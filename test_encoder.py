@@ -2,9 +2,24 @@ import os
 import subprocess
 import json
 import flask
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, render_template_string
 
 app = Flask(__name__)
+
+# Simple HTML interface for testing upload directly in browser
+HTML_TEMPLATE = """
+<!DOCTYPE html>
+<html>
+<head><title>Test Encoder</title></head>
+<body style="font-family: Arial; padding: 30px;">
+    <h2>4K / 2K Video Force Downscale Test</h2>
+    <form action="/transcode" method="post" enctype="multipart/form-data">
+        <input type="file" name="video" accept="video/mp4,video/*" required><br><br>
+        <button type="submit" style="padding: 10px 20px;">Upload & Transcode</button>
+    </form>
+</body>
+</html>
+"""
 
 def probe_video_info(filepath):
     info = {"fps": 60.0, "width": 1080, "height": 1920, "codec_name": "h264"}
@@ -36,10 +51,14 @@ def probe_video_info(filepath):
         print(f"[warn] ffprobe failed: {e}")
     return info
 
-@app.route("/test_transcode", methods=["POST"])
-def test_transcode():
+@app.route("/", methods=["GET"])
+def index():
+    return render_template_string(HTML_TEMPLATE)
+
+@app.route("/transcode", methods=["POST"])
+def transcode():
     if "video" not in request.files:
-        return jsonify({"error": "No video file provided"}), 400
+        return "No video file provided", 400
 
     video_file = request.files["video"]
     in_path = "test_in.mp4"
@@ -50,10 +69,8 @@ def test_transcode():
     in_w = vinfo.get("width", 1080)
     in_h = vinfo.get("height", 1920)
 
-    print(f"[Info] Input video probed: {in_w}x{in_h} @ {vinfo['fps']}FPS, codec: {vinfo['codec_name']}")
+    print(f"[Info] Input video probed: {in_w}x{in_h} @ {vinfo['fps']}FPS")
 
-    # Universal High Quality Downscale Chain for 4K / 2K / Any Resolution to TikTok 1080p 60FPS High Quality
-    # Handles both portrait (9:16) and landscape (16:9) perfectly with Lanczos filter and sRGB/bt709 color space.
     vf_chain = (
         "scale='if(gt(iw,ih),1920,1080)':'if(gt(iw,ih),-2,1920)'"
         ":flags=lanczos+accurate_rnd+full_chroma_int,"
@@ -92,18 +109,12 @@ def test_transcode():
         out_path
     ]
 
-    print("[Info] Running FFmpeg force downscale command...")
     res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     if res.returncode != 0:
-        return jsonify({"error": "FFmpeg failed", "details": res.stderr[-1000:]}), 500
+        return f"FFmpeg failed: {res.stderr[-500:]}", 500
 
     out_vinfo = probe_video_info(out_path)
-    return jsonify({
-        "success": True,
-        "input_resolution": f"{in_w}x{in_h}",
-        "output_resolution": f"{out_vinfo.get('width')}x{out_vinfo.get('height')}",
-        "output_fps": out_vinfo.get("fps")
-    })
+    return f"<h3>Transcode Successful!</h3><p>Input: {in_w}x{in_h} -> Output: {out_vinfo.get('width')}x{out_vinfo.get('height')} @ {out_vinfo.get('fps')}FPS</p><a href='/'>Back</a>"
 
 if __name__ == "__main__":
-    print("Standalone Test Encoder Server ready on port 5000")
+    app.run(host="0.0.0.0", port=5000)
