@@ -52,11 +52,6 @@ def get_full_probe(filepath):
     return {"error": res.stderr}
 
 def patch_mp4_to_352x288(filepath, orig_w=1080, orig_h=1920, spoof_w=352, spoof_h=288, mode="spoof_both"):
-    """
-    Binary patches the MP4 container headers (tkhd and hvc1/avc1 visual sample entry)
-    so the OS, Browser, and TikTok read the file as 352x288px, while the actual
-    HEVC bitstream remains 1080x1920 @ 22.3Mbps!
-    """
     with open(filepath, "rb") as f:
         data = bytearray(f.read())
 
@@ -71,8 +66,7 @@ def patch_mp4_to_352x288(filepath, orig_w=1080, orig_h=1920, spoof_w=352, spoof_
         pos = data.find(b"tkhd", idx)
         if pos == -1:
             break
-        # Search within the tkhd box (next 100 bytes) for orig_w and orig_h
-         window = data[pos:pos+100]
+        window = data[pos:pos+100]
         wh_pos = window.find(orig_tkhd_wh)
         if wh_pos != -1:
             actual_pos = pos + wh_pos
@@ -90,7 +84,6 @@ def patch_mp4_to_352x288(filepath, orig_w=1080, orig_h=1920, spoof_w=352, spoof_
                 pos = data.find(tag, idx)
                 if pos == -1:
                     break
-                # Width and height in SampleEntry are located 24 to 40 bytes after the tag name
                 window = data[pos:pos+50]
                 wh_pos = window.find(orig_stsd_wh)
                 if wh_pos != -1:
@@ -128,7 +121,6 @@ def transcode():
 
     target_w, target_h = (1920, 1080) if is_landscape else (1080, 1920)
 
-    # 4K to 1080p Ultra-Sharp Lanczos + CAS filter
     vf_chain = (
         f"scale={target_w}:{target_h}:flags=lanczos+accurate_rnd+full_chroma_int,"
         "cas=strength=0.35,"
@@ -136,7 +128,6 @@ def transcode():
         "format=yuvj420p"
     )
 
-    # Exact 22.3 Mbps HEVC parameters from your reference video
     x265_params = (
         "level-idc=41:ref=1:bframes=2:no-open-gop=1:keyint=120:min-keyint=60:"
         "range=full:colorprim=bt709:transfer=bt709:colormatrix=bt709:"
@@ -172,7 +163,6 @@ def transcode():
     if res.returncode != 0:
         return f"<pre>FFmpeg failed:\n{res.stderr[-2000:]}</pre>", 500
 
-    # Apply the 352x288 Binary Header Spoof!
     patches = patch_mp4_to_352x288(out_path, orig_w=target_w, orig_h=target_h, spoof_w=352, spoof_h=288, mode=mode)
 
     return f"""
