@@ -9,40 +9,38 @@ HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>4K Enhanced & Bypass Test Lab</title>
+    <title>HEVC (hvc1) 4K Clone Encoder</title>
     <style>
         body { font-family: Arial, sans-serif; padding: 25px; background: #121212; color: #fff; }
         .card { background: #1e1e1e; padding: 20px; border-radius: 10px; margin-bottom: 20px; border: 1px solid #333; }
         button { padding: 12px 24px; background: #00e676; color: #000; font-weight: bold; border: none; border-radius: 6px; cursor: pointer; }
-        select, input { padding: 10px; margin: 10px 0; width: 100%; max-width: 400px; background: #2c2c2c; color: #fff; border: 1px solid #444; border-radius: 5px; }
+        select, input { padding: 10px; margin: 10px 0; width: 100%; max-width: 450px; background: #2c2c2c; color: #fff; border: 1px solid #444; border-radius: 5px; }
         pre { background: #000; color: #0f0; padding: 15px; border-radius: 6px; overflow-x: auto; font-size: 13px; }
     </style>
 </head>
 <body>
-    <h2>⚡ 4K/2K Enhanced & 352x288 Bypass Test Lab</h2>
+    <h2>⚡ 4K to HEVC (libx265 hvc1) Exact Clone Lab</h2>
     
     <div class="card">
-        <h3>၁။ 4K/2K Video ကို Enhanced Method ဖြင့် စမ်းသပ်ရန်</h3>
+        <h3>၁။ 4K/2K Video ကို ကြည်တောက်ရှင်း HEVC (hvc1) Formula ဖြင့် ပြောင်းရန်</h3>
         <form action="/transcode" method="post" enctype="multipart/form-data">
-            <label>ဗီဒီယို ရွေးချယ်ပါ:</label><br>
+            <label>4K / 2K ဗီဒီယို ရွေးချယ်ပါ:</label><br>
             <input type="file" name="video" accept="video/mp4,video/*" required><br>
             
-            <label>Encoding Mode ရွေးချယ်ပါ:</label><br>
+            <label>Encoding Preset ရွေးချယ်ပါ:</label><br>
             <select name="mode">
-                <option value="enhanced_1080p">Mode 1: Ultra-Crisp Enhanced (CAS + Unsharp + Sweetspot Bitrate)</option>
-                <option value="anamorphic_352">Mode 2: 352x288 Low-Res Bypass Trick (SAR/DAR Stretch)</option>
-                <option value="sweetspot_720p">Mode 3: 720p Zero-Reencode Bypass (High Sharpness)</option>
+                <option value="hevc_exact">Mode 1: 100% Exact Clone (libx265 + hvc1 + 22.3Mbps + yuvj420p pc)</option>
+                <option value="hevc_enhanced">Mode 2: Exact Clone + Extra Sharpness (CAS + Unsharp + libx265)</option>
             </select><br><br>
-            <button type="submit">🚀 Upload & Enhance Video</button>
+            <button type="submit">🚀 Encode with libx265 (HEVC)</button>
         </form>
     </div>
 
     <div class="card">
-        <h3>၂။ ကြည်တောက်ရှင်းနေသော 352x288 ဗီဒီယို၏ လျှို့ဝှက်ချက်ကို စစ်ဆေးရန် (Inspector)</h3>
-        <p>အာစိရဲ့ 352x288 ဗီဒီယိုဖိုင်ကို ဒီမှာတင်ပြီး သူ့ရဲ့ အတွင်းပိုင်း FFprobe parameters တွေကို အတိအကျ ကြည့်နိုင်ပါတယ်-</p>
+        <h3>၂။ Video Parameter Inspector (FFprobe)</h3>
         <form action="/inspect" method="post" enctype="multipart/form-data">
             <input type="file" name="video" accept="video/mp4,video/*" required><br><br>
-            <button type="submit" style="background: #29b6f6;">🔍 Inspect Exact Parameters</button>
+            <button type="submit" style="background: #29b6f6;">🔍 Inspect Video</button>
         </form>
     </div>
 </body>
@@ -75,8 +73,7 @@ def inspect():
     return f"""
     <body style="background:#121212; color:#fff; font-family:Arial; padding:25px;">
         <h3>🔍 Video Exact Parameter Report</h3>
-        <p>ဒီအချက်အလက်တွေကို Copy ကူးပြီး ချက်တင်မှာ ပို့ပေးပါ အာစိ၊ 100% တစ်ထပ်တည်း တူအောင် ဆောက်ပေးပါမယ်-</p>
-        <pre style="background:#000; color:#0f0; padding:15px; border-radius:8px; overflow:auto;">{pretty_json}</pre>
+        <pre>{pretty_json}</pre>
         <a href="/" style="color:#00e676; font-size:18px;">⬅ Back</a>
     </body>
     """
@@ -87,7 +84,7 @@ def transcode():
         return "No video file provided", 400
 
     video_file = request.files["video"]
-    mode = request.form.get("mode", "enhanced_1080p")
+    mode = request.form.get("mode", "hevc_exact")
     in_path = "test_in.mp4"
     out_path = "test_out.mp4"
     video_file.save(in_path)
@@ -99,41 +96,33 @@ def transcode():
     in_h = int(vstream.get("height", 1920))
     is_landscape = in_w > in_h
 
-    # Mode 1: Ultra-Crisp Enhanced (4K Micro-Detail Retention + TikTok Sweetspot Bitrate)
-    if mode == "enhanced_1080p":
-        target_w, target_h = (1920, 1080) if is_landscape else (1080, 1920)
+    target_w, target_h = (1920, 1080) if is_landscape else (1080, 1920)
+
+    if mode == "hevc_enhanced":
+        # Downscale from 4K with Lanczos + Subtle Contrast Adaptive Sharpening
         vf_chain = (
             f"scale={target_w}:{target_h}:flags=lanczos+accurate_rnd+full_chroma_int,"
-            "cas=strength=0.45,"
-            "unsharp=lx=3:ly=3:la=0.6:cx=3:cy=3:ca=0.0,"
-            "eq=contrast=1.04:saturation=1.08,"
-            "fps=60,format=yuv420p"
+            "cas=strength=0.35,"
+            "unsharp=lx=3:ly=3:la=0.4,"
+            "fps=60,"
+            "format=yuvj420p"
         )
-        bitrate_args = ["-crf", "16", "-maxrate", "14500k", "-bufsize", "29000k"]
-
-    # Mode 2: 352x288 Anamorphic / Low-Res Bypass Trick
-    elif mode == "anamorphic_352":
-        aspect = "16/9" if is_landscape else "9/16"
-        vf_chain = (
-            "scale=352:288:flags=lanczos+accurate_rnd,"
-            "cas=strength=0.6,"
-            "unsharp=lx=3:ly=3:la=0.8,"
-            f"setdar={aspect},"
-            "fps=60,format=yuv420p"
-        )
-        bitrate_args = ["-crf", "12", "-maxrate", "8000k", "-bufsize", "16000k"]
-
-    # Mode 3: 720p High-Sharpness Bypass (Often skips TikTok heavy re-encode)
     else:
-        target_w, target_h = (1280, 720) if is_landscape else (720, 1280)
+        # Pure Lanczos downscale matching the reference video
         vf_chain = (
             f"scale={target_w}:{target_h}:flags=lanczos+accurate_rnd+full_chroma_int,"
-            "cas=strength=0.5,"
-            "unsharp=lx=3:ly=3:la=0.75,"
-            "eq=contrast=1.05:saturation=1.08,"
-            "fps=60,format=yuv420p"
+            "fps=60,"
+            "format=yuvj420p"
         )
-        bitrate_args = ["-crf", "15", "-maxrate", "9500k", "-bufsize", "19000k"]
+
+    # Exact match to the inspected reference video:
+    # codec: hevc (libx265), tag: hvc1, profile: Main, level: 4.1 (123),
+    # pix_fmt: yuvj420p, color_range: pc, bt709, refs: 1, bframes: 2, bitrate: ~22.3Mbps
+    x265_params = (
+        "level-idc=41:ref=1:bframes=2:no-open-gop=1:keyint=120:min-keyint=60:"
+        "range=full:colorprim=bt709:transfer=bt709:colormatrix=bt709:"
+        "vbv-maxrate=24000:vbv-bufsize=48000:aq-mode=2:psy-rd=2.0"
+    )
 
     cmd = [
         "ffmpeg", "-y",
@@ -141,22 +130,19 @@ def transcode():
         "-vf", vf_chain,
         "-fps_mode", "cfr",
         "-r", "60",
-        "-c:v", "libx264",
-        "-preset", "slow",
-        "-profile:v", "high",
-        "-level:v", "4.1",
-        "-x264-params", "aq-mode=3:aq-strength=0.9:deblock=-1,-1:psy-rd=1.2,0.2",
-        *bitrate_args,
-        "-g", "120",
-        "-keyint_min", "60",
-        "-sc_threshold", "0",
-        "-pix_fmt", "yuv420p",
+        "-c:v", "libx265",
+        "-tag:v", "hvc1",
+        "-preset", "faster",
+        "-profile:v", "main",
+        "-b:v", "22300k",
+        "-x265-params", x265_params,
+        "-pix_fmt", "yuvj420p",
+        "-color_range", "pc",
         "-colorspace", "bt709",
         "-color_primaries", "bt709",
         "-color_trc", "bt709",
-        "-color_range", "tv",
         "-c:a", "aac",
-        "-b:a", "192k",
+        "-b:a", "130k",
         "-ar", "48000",
         "-ac", "2",
         "-movflags", "+faststart",
@@ -165,7 +151,7 @@ def transcode():
 
     res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     if res.returncode != 0:
-        return f"<pre>FFmpeg failed:\n{res.stderr[-1500:]}</pre>", 500
+        return f"<pre>FFmpeg failed:\n{res.stderr[-2000:]}</pre>", 500
 
     out_data = get_full_probe(out_path)
     out_streams = out_data.get("streams", [])
@@ -173,10 +159,11 @@ def transcode():
 
     return f"""
     <body style="background:#121212; color:#fff; font-family:Arial; padding:30px;">
-        <h2>✅ Enhanced Transcode Successful! ({mode})</h2>
-        <p>Input: <b>{in_w}x{in_h}</b> ➔ Output: <b>{out_v.get('width')}x{out_v.get('height')}</b> (DAR: {out_v.get('display_aspect_ratio', 'N/A')})</p>
+        <h2>✅ HEVC (libx265 hvc1) Encode Successful!</h2>
+        <p>Input: <b>{in_w}x{in_h}</b> ➔ Output: <b>{out_v.get('width')}x{out_v.get('height')}</b></p>
+        <p>Codec: <b>{out_v.get('codec_name')} ({out_v.get('codec_tag_string')})</b> | Pixel Format: <b>{out_v.get('pix_fmt')} ({out_v.get('color_range')})</b> | Bitrate: <b>{int(out_v.get('bit_rate', 0))//1000} kbps</b></p>
         <br>
-        <a href="/download" style="font-size: 18px; background: #00e676; color: #000; font-weight: bold; padding: 14px 28px; text-decoration: none; border-radius: 6px; display: inline-block;">⬇️ Download Enhanced Video</a>
+        <a href="/download" style="font-size: 18px; background: #00e676; color: #000; font-weight: bold; padding: 14px 28px; text-decoration: none; border-radius: 6px; display: inline-block;">⬇️ Download HEVC Video</a>
         <br><br><br>
         <a href="/" style="color: #bbb;">⬅ Back to Test Lab</a>
     </body>
@@ -185,7 +172,7 @@ def transcode():
 @app.route("/download", methods=["GET"])
 def download():
     if os.path.exists("test_out.mp4"):
-        return send_file("test_out.mp4", as_attachment=True, download_name="enhanced_tiktok_hq.mp4")
+        return send_file("test_out.mp4", as_attachment=True, download_name="hevc_hvc1_tiktok_hq.mp4")
     return "File not found", 404
 
 if __name__ == "__main__":
