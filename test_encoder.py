@@ -1,12 +1,10 @@
 import os
 import subprocess
 import json
-import flask
-from flask import Flask, request, jsonify, render_template_string
+from flask import Flask, request, render_template_string, send_file
 
 app = Flask(__name__)
 
-# Simple HTML interface for testing upload directly in browser
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html>
@@ -114,7 +112,18 @@ def transcode():
         return f"FFmpeg failed: {res.stderr[-500:]}", 500
 
     out_vinfo = probe_video_info(out_path)
-    return f"<h3>Transcode Successful!</h3><p>Input: {in_w}x{in_h} -> Output: {out_vinfo.get('width')}x{out_vinfo.get('height')} @ {out_vinfo.get('fps')}FPS</p><a href='/'>Back</a>"
+    return f"""
+    <h3>Transcode Successful!</h3>
+    <p>Input: {in_w}x{in_h} -> Output: {out_vinfo.get('width')}x{out_vinfo.get('height')} @ {out_vinfo.get('fps')}FPS</p>
+    <a href="/download" style="font-size: 18px; background: green; color: white; padding: 10px 20px; text-decoration: none; display: inline-block;">Download Transcoded Video</a>
+    <br><br><a href="/">Back to Home</a>
+    """
+
+@app.route("/download", methods=["GET"])
+def download():
+    if os.path.exists("test_out.mp4"):
+        return send_file("test_out.mp4", as_attachment=True, download_name="tiktok_hq_output.mp4")
+    return "File not found", 404
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
