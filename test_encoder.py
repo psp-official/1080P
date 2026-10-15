@@ -1,4 +1,5 @@
 import os
+import struct
 import subprocess
 import json
 from flask import Flask, request, render_template_string, send_file
@@ -9,7 +10,7 @@ HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>HEVC (hvc1) 4K Clone Encoder</title>
+    <title>352x288 Spoof + 4K HEVC Encoder</title>
     <style>
         body { font-family: Arial, sans-serif; padding: 25px; background: #121212; color: #fff; }
         .card { background: #1e1e1e; padding: 20px; border-radius: 10px; margin-bottom: 20px; border: 1px solid #333; }
@@ -19,28 +20,20 @@ HTML_TEMPLATE = """
     </style>
 </head>
 <body>
-    <h2>⚡ 4K to HEVC (libx265 hvc1) Exact Clone Lab</h2>
+    <h2>⚡ 4K Quality inside 352x288px Header Spoof Lab</h2>
     
     <div class="card">
-        <h3>၁။ 4K/2K Video ကို ကြည်တောက်ရှင်း HEVC (hvc1) Formula ဖြင့် ပြောင်းရန်</h3>
+        <h3>၁။ 4K/2K Video ကို 352x288px (4K Crystal Clear) အဖြစ် ပြောင်းရန်</h3>
         <form action="/transcode" method="post" enctype="multipart/form-data">
             <label>4K / 2K ဗီဒီယို ရွေးချယ်ပါ:</label><br>
             <input type="file" name="video" accept="video/mp4,video/*" required><br>
             
-            <label>Encoding Preset ရွေးချယ်ပါ:</label><br>
+            <label>Spoof Method ရွေးချယ်ပါ:</label><br>
             <select name="mode">
-                <option value="hevc_exact">Mode 1: 100% Exact Clone (libx265 + hvc1 + 22.3Mbps + yuvj420p pc)</option>
-                <option value="hevc_enhanced">Mode 2: Exact Clone + Extra Sharpness (CAS + Unsharp + libx265)</option>
+                <option value="spoof_both">Method 1: Full 352x288 Header Spoof (tkhd + stsd patched, 1080p HEVC stream)</option>
+                <option value="spoof_tkhd">Method 2: Track Header Only 352x288 Spoof (tkhd patched)</option>
             </select><br><br>
-            <button type="submit">🚀 Encode with libx265 (HEVC)</button>
-        </form>
-    </div>
-
-    <div class="card">
-        <h3>၂။ Video Parameter Inspector (FFprobe)</h3>
-        <form action="/inspect" method="post" enctype="multipart/form-data">
-            <input type="file" name="video" accept="video/mp4,video/*" required><br><br>
-            <button type="submit" style="background: #29b6f6;">🔍 Inspect Video</button>
+            <button type="submit">🚀 Encode & Patch to 352x288px</button>
         </form>
     </div>
 </body>
@@ -58,25 +51,62 @@ def get_full_probe(filepath):
         return json.loads(res.stdout)
     return {"error": res.stderr}
 
+def patch_mp4_to_352x288(filepath, orig_w=1080, orig_h=1920, spoof_w=352, spoof_h=288, mode="spoof_both"):
+    """
+    Binary patches the MP4 container headers (tkhd and hvc1/avc1 visual sample entry)
+    so the OS, Browser, and TikTok read the file as 352x288px, while the actual
+    HEVC bitstream remains 1080x1920 @ 22.3Mbps!
+    """
+    with open(filepath, "rb") as f:
+        data = bytearray(f.read())
+
+    patched_count = 0
+
+    # 1. Patch 'tkhd' (Track Header Box) -> 32-bit Fixed-Point 16.16 format
+    orig_tkhd_wh = struct.pack(">II", orig_w << 16, orig_h << 16)
+    spoof_tkhd_wh = struct.pack(">II", spoof_w << 16, spoof_h << 16)
+
+    idx = 0
+    while True:
+        pos = data.find(b"tkhd", idx)
+        if pos == -1:
+            break
+        # Search within the tkhd box (next 100 bytes) for orig_w and orig_h
+         window = data[pos:pos+100]
+        wh_pos = window.find(orig_tkhd_wh)
+        if wh_pos != -1:
+            actual_pos = pos + wh_pos
+            data[actual_pos:actual_pos+8] = spoof_tkhd_wh
+            patched_count += 1
+        idx = pos + 4
+
+    # 2. Patch Visual Sample Entry ('hvc1' / 'hev1' / 'avc1' inside stsd box) -> 16-bit unsigned int
+    if mode == "spoof_both":
+        orig_stsd_wh = struct.pack(">HH", orig_w, orig_h)
+        spoof_stsd_wh = struct.pack(">HH", spoof_w, spoof_h)
+        for tag in [b"hvc1", b"hev1", b"avc1"]:
+            idx = 0
+            while True:
+                pos = data.find(tag, idx)
+                if pos == -1:
+                    break
+                # Width and height in SampleEntry are located 24 to 40 bytes after the tag name
+                window = data[pos:pos+50]
+                wh_pos = window.find(orig_stsd_wh)
+                if wh_pos != -1:
+                    actual_pos = pos + wh_pos
+                    data[actual_pos:actual_pos+4] = spoof_stsd_wh
+                    patched_count += 1
+                idx = pos + 4
+
+    with open(filepath, "wb") as f:
+        f.write(data)
+
+    return patched_count
+
 @app.route("/", methods=["GET"])
 def index():
     return render_template_string(HTML_TEMPLATE)
-
-@app.route("/inspect", methods=["POST"])
-def inspect():
-    if "video" not in request.files:
-        return "No video file", 400
-    f = request.files["video"]
-    f.save("inspect_in.mp4")
-    data = get_full_probe("inspect_in.mp4")
-    pretty_json = json.dumps(data, indent=2)
-    return f"""
-    <body style="background:#121212; color:#fff; font-family:Arial; padding:25px;">
-        <h3>🔍 Video Exact Parameter Report</h3>
-        <pre>{pretty_json}</pre>
-        <a href="/" style="color:#00e676; font-size:18px;">⬅ Back</a>
-    </body>
-    """
 
 @app.route("/transcode", methods=["POST"])
 def transcode():
@@ -84,7 +114,7 @@ def transcode():
         return "No video file provided", 400
 
     video_file = request.files["video"]
-    mode = request.form.get("mode", "hevc_exact")
+    mode = request.form.get("mode", "spoof_both")
     in_path = "test_in.mp4"
     out_path = "test_out.mp4"
     video_file.save(in_path)
@@ -98,26 +128,15 @@ def transcode():
 
     target_w, target_h = (1920, 1080) if is_landscape else (1080, 1920)
 
-    if mode == "hevc_enhanced":
-        # Downscale from 4K with Lanczos + Subtle Contrast Adaptive Sharpening
-        vf_chain = (
-            f"scale={target_w}:{target_h}:flags=lanczos+accurate_rnd+full_chroma_int,"
-            "cas=strength=0.35,"
-            "unsharp=lx=3:ly=3:la=0.4,"
-            "fps=60,"
-            "format=yuvj420p"
-        )
-    else:
-        # Pure Lanczos downscale matching the reference video
-        vf_chain = (
-            f"scale={target_w}:{target_h}:flags=lanczos+accurate_rnd+full_chroma_int,"
-            "fps=60,"
-            "format=yuvj420p"
-        )
+    # 4K to 1080p Ultra-Sharp Lanczos + CAS filter
+    vf_chain = (
+        f"scale={target_w}:{target_h}:flags=lanczos+accurate_rnd+full_chroma_int,"
+        "cas=strength=0.35,"
+        "fps=60,"
+        "format=yuvj420p"
+    )
 
-    # Exact match to the inspected reference video:
-    # codec: hevc (libx265), tag: hvc1, profile: Main, level: 4.1 (123),
-    # pix_fmt: yuvj420p, color_range: pc, bt709, refs: 1, bframes: 2, bitrate: ~22.3Mbps
+    # Exact 22.3 Mbps HEVC parameters from your reference video
     x265_params = (
         "level-idc=41:ref=1:bframes=2:no-open-gop=1:keyint=120:min-keyint=60:"
         "range=full:colorprim=bt709:transfer=bt709:colormatrix=bt709:"
@@ -153,26 +172,25 @@ def transcode():
     if res.returncode != 0:
         return f"<pre>FFmpeg failed:\n{res.stderr[-2000:]}</pre>", 500
 
-    out_data = get_full_probe(out_path)
-    out_streams = out_data.get("streams", [])
-    out_v = next((s for s in out_streams if s.get("codec_type") == "video"), {})
+    # Apply the 352x288 Binary Header Spoof!
+    patches = patch_mp4_to_352x288(out_path, orig_w=target_w, orig_h=target_h, spoof_w=352, spoof_h=288, mode=mode)
 
     return f"""
     <body style="background:#121212; color:#fff; font-family:Arial; padding:30px;">
-        <h2>✅ HEVC (libx265 hvc1) Encode Successful!</h2>
-        <p>Input: <b>{in_w}x{in_h}</b> ➔ Output: <b>{out_v.get('width')}x{out_v.get('height')}</b></p>
-        <p>Codec: <b>{out_v.get('codec_name')} ({out_v.get('codec_tag_string')})</b> | Pixel Format: <b>{out_v.get('pix_fmt')} ({out_v.get('color_range')})</b> | Bitrate: <b>{int(out_v.get('bit_rate', 0))//1000} kbps</b></p>
+        <h2>✅ 352x288 Spoofed 4K-Quality Video Ready!</h2>
+        <p>True Encoded Stream: <b>{target_w}x{target_h} @ 22.3 Mbps HEVC (hvc1)</b></p>
+        <p>Spoofed Container Header: <b>352x288 px</b> (Patched {patches} header boxes)</p>
         <br>
-        <a href="/download" style="font-size: 18px; background: #00e676; color: #000; font-weight: bold; padding: 14px 28px; text-decoration: none; border-radius: 6px; display: inline-block;">⬇️ Download HEVC Video</a>
+        <a href="/download" style="font-size: 18px; background: #00e676; color: #000; font-weight: bold; padding: 14px 28px; text-decoration: none; border-radius: 6px; display: inline-block;">⬇️ Download 352x288 Spoofed Video</a>
         <br><br><br>
-        <a href="/" style="color: #bbb;">⬅ Back to Test Lab</a>
+        <a href="/" style="color: #bbb;">⬅ Back to Lab</a>
     </body>
     """
 
 @app.route("/download", methods=["GET"])
 def download():
     if os.path.exists("test_out.mp4"):
-        return send_file("test_out.mp4", as_attachment=True, download_name="hevc_hvc1_tiktok_hq.mp4")
+        return send_file("test_out.mp4", as_attachment=True, download_name="spoofed_352x288_hq.mp4")
     return "File not found", 404
 
 if __name__ == "__main__":
