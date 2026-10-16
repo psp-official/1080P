@@ -11,22 +11,41 @@ HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Quality_3_fixed_exact_q2_style Encoder</title>
+    <title>Quality_3_fixed_exact_q2_style Encoder & Deep Inspector</title>
     <style>
         body { font-family: Arial, sans-serif; padding: 25px; background: #121212; color: #fff; }
         .card { background: #1e1e1e; padding: 20px; border-radius: 10px; margin-bottom: 20px; border: 1px solid #333; }
         button { padding: 12px 24px; background: #00e676; color: #000; font-weight: bold; border: none; border-radius: 6px; cursor: pointer; }
-        input { padding: 10px; margin: 10px 0; width: 100%; max-width: 480px; background: #2c2c2c; color: #fff; border: 1px solid #444; border-radius: 5px; }
+        input, select { padding: 10px; margin: 10px 0; width: 100%; max-width: 480px; background: #2c2c2c; color: #fff; border: 1px solid #444; border-radius: 5px; }
         pre { background: #000; color: #0f0; padding: 15px; border-radius: 6px; overflow-x: auto; font-size: 12px; white-space: pre-wrap; word-break: break-all; }
+        .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+        @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+        .badge { display: inline-block; padding: 4px 10px; border-radius: 4px; background: #29b6f6; color: #000; font-weight: bold; font-size: 12px; margin-right: 6px; }
     </style>
 </head>
 <body>
-    <h2>⚡ 2K/4K Auto-Encoder (100% Exact Quality_3_fixed_exact_q2_style Formula)</h2>
+    <h2>⚡ 2K/4K Auto-Encoder & Full Video Inspector (Quality_3_fixed_exact_q2_style Formula)</h2>
+
     <div class="card">
-        <h3>မည်သည့် 2K / 4K Video ကိုမဆို Quality_3_fixed_exact_q2_style.mp4 ပုံစံအတိအကျ ပြောင်းရန်</h3>
+        <h3>၁။ မည်သည့် 2K / 4K Video ကိုမဆို Quality_3_fixed_exact_q2_style.mp4 ပုံစံအတိအကျ ပြောင်းရန် + အချက်အလက်အသေးစိတ် ကြည့်ရန်</h3>
+        <p>ဗီဒီယိုတင်လိုက်သည်နှင့် မူရင်းဗီဒီယို၏ အချက်အလက်အကုန် (Input Details) နှင့် ပြောင်းလဲပြီးသား ဗီဒီယို၏ အချက်အလက်အကုန် (Output X-Ray, MP4 Box Structure, Hex Dump & FFprobe JSON) တို့ကို နှိုင်းယှဉ်ပြသပေးပါမည်-</p>
         <form action="/transcode" method="post" enctype="multipart/form-data">
+            <label>2K / 4K / 1080p ဗီဒီယို ရွေးချယ်ပါ:</label><br>
+            <input type="file" name="video" accept="video/mp4,video/*" required><br>
+            <label>Mode ရွေးချယ်ပါ:</label><br>
+            <select name="mode">
+                <option value="full_encode">Mode 1: Full 2K/4K -> 1080p60 HEVC Encode + Quality_3_fixed_exact_q2_style Rebuild</option>
+                <option value="header_only">Mode 2: Instant Structure & Header Rebuild Only (No Re-encode, For Already Encoded HEVC Videos)</option>
+            </select><br><br>
+            <button type="submit">🚀 Encode & Show Full Video Details</button>
+        </form>
+    </div>
+
+    <div class="card">
+        <h3>၂။ Standalone Deep X-Ray Inspector (Encode မလုပ်ဘဲ ဗီဒီယိုဖိုင်၏ အချက်အလက်အကုန် စစ်ဆေးရန်)</h3>
+        <form action="/deep_xray" method="post" enctype="multipart/form-data">
             <input type="file" name="video" accept="video/mp4,video/*" required><br><br>
-            <button type="submit">🚀 Encode to Quality_3_fixed_exact_q2_style</button>
+            <button type="submit" style="background: #ff9100;">🔍 Inspect All Video Details</button>
         </form>
     </div>
 </body>
@@ -210,29 +229,161 @@ def apply_exact_quality3_fixed_structure(filepath, target_w=1080, target_h=1920)
     return f"Rebuilt to Exact Quality_3_fixed_exact_q2_style (moov={new_moov_size}B, delta={delta}B)"
 
 
-def probe_video_dimensions(filepath):
-    info = {"width": 1080, "height": 1920}
-    try:
-        cmd = [
-            "ffprobe", "-v", "error",
-            "-select_streams", "v:0",
-            "-show_entries", "stream=width,height",
-            "-of", "json", filepath
-        ]
-        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=15)
-        if res.returncode == 0:
-            data = json.loads(res.stdout)
-            streams = data.get("streams", [])
-            if streams:
-                info["width"] = int(streams[0].get("width") or 1080)
-                info["height"] = int(streams[0].get("height") or 1920)
-    except Exception:
-        pass
-    return info
+
+def get_full_ffprobe_json(filepath):
+    cmd = [
+        "ffprobe", "-v", "error",
+        "-show_format",
+        "-show_streams",
+        "-of", "json", filepath
+    ]
+    res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if res.returncode == 0:
+        try:
+            return json.loads(res.stdout)
+        except Exception:
+            return {"raw_stdout": res.stdout}
+    return {"error": res.stderr}
+
+def parse_mp4_boxes_detailed(data, offset=0, end=None, depth=0):
+    if end is None:
+        end = len(data)
+    boxes = []
+    pos = offset
+    container_types = {b'moov', b'trak', b'mdia', b'minf', b'stbl', b'edts', b'dinf', b'udta', b'meta', b'ilst'}
+    while pos + 8 <= end:
+        size = struct.unpack(">I", data[pos:pos+4])[0]
+        btype = data[pos+4:pos+8]
+        header_size = 8
+        if size == 1:
+            if pos + 16 > end:
+                break
+            size = struct.unpack(">Q", data[pos+8:pos+16])[0]
+            header_size = 16
+        elif size == 0:
+            size = end - pos
+        if size < header_size or pos + size > end:
+            break
+
+        btype_str = btype.decode('latin1', errors='replace')
+        info = f"{'  '*depth}[{btype_str}] offset={pos} size={size}"
+        payload = data[pos+header_size:pos+size]
+
+        if btype == b'ftyp':
+            info += f" -> {payload}"
+        elif btype == b'mvhd' and len(payload) >= 28:
+            ver = payload[0]
+            ts = struct.unpack(">I", payload[12:16])[0] if ver == 0 else struct.unpack(">I", payload[20:24])[0]
+            dur = struct.unpack(">I", payload[16:20])[0] if ver == 0 else struct.unpack(">q", payload[24:32])[0]
+            info += f" -> version={ver}, timescale={ts}, duration={dur}"
+        elif btype == b'tkhd' and len(payload) >= 84:
+            version = payload[0]
+            w_fp, h_fp = struct.unpack(">II", payload[76:84]) if version == 0 else struct.unpack(">II", payload[88:96])
+            matrix = struct.unpack(">9I", payload[40:76]) if version == 0 else struct.unpack(">9I", payload[52:88])
+            info += f" -> tkhd_width={w_fp/65536.0}, tkhd_height={h_fp/65536.0}, matrix={matrix}"
+        elif btype == b'mdhd' and len(payload) >= 20:
+            version = payload[0]
+            timescale = struct.unpack(">I", payload[12:16])[0] if version == 0 else struct.unpack(">I", payload[20:24])[0]
+            dur = struct.unpack(">I", payload[16:20])[0] if version == 0 else struct.unpack(">Q", payload[24:32])[0]
+            info += f" -> timescale={timescale}, duration={dur}"
+        elif btype == b'elst' and len(payload) >= 16:
+            cnt = struct.unpack(">I", payload[4:8])[0]
+            seg_dur, media_time, mr_int, mr_frac = struct.unpack(">IiHH", payload[8:20])
+            info += f" -> count={cnt}, seg_dur={seg_dur}, media_time={media_time}, rate={mr_int}.{mr_frac}"
+        elif btype == b'stsd' and len(payload) >= 16:
+            entry_size = struct.unpack(">I", payload[8:12])[0]
+            entry_type = payload[12:16].decode('latin1', errors='replace')
+            if len(payload) >= 44:
+                vw, vh = struct.unpack(">HH", payload[36:40])
+                comp_len = payload[50] if len(payload) > 50 else 0
+                comp_str = payload[51:51+comp_len].decode('latin1', errors='replace') if len(payload) >= 51+comp_len else ""
+                info += f" -> sample_entry={entry_type} (entry_size={entry_size}), width(+28)={vw}, height(+30)={vh}, compressor='{comp_str}'"
+            sub_start = pos + header_size + 8 + 86
+            sub_end = pos + header_size + 8 + entry_size
+            if sub_end <= pos + size and sub_start < sub_end:
+                boxes.append(info)
+                boxes.extend(parse_mp4_boxes_detailed(data, sub_start, sub_end, depth + 1))
+                pos += size
+                continue
+        elif btype in (b'hvcC', b'avcC', b'pasp', b'clap', b'colr', b'uuid', b'fiel', b'btrt'):
+            hex_preview = binascii.hexlify(payload[:256]).decode('ascii')
+            ascii_preview = ''.join(chr(b) if 32 <= b < 127 else '.' for b in payload)
+            info += f"\n{'  '*(depth+1)}HEX (first 256B): {hex_preview}\n{'  '*(depth+1)}ASCII: {ascii_preview}"
+        elif btype == b'stss' and len(payload) >= 8:
+            cnt = struct.unpack(">I", payload[4:8])[0]
+            kfs = [struct.unpack(">I", payload[8+i*4:12+i*4])[0] for i in range(min(cnt, 30)) if 12+i*4 <= len(payload)]
+            info += f" -> keyframe_count={cnt}, keyframes={kfs}"
+        elif btype == b'stts' and len(payload) >= 16:
+            cnt = struct.unpack(">I", payload[4:8])[0]
+            sc, sd = struct.unpack(">II", payload[8:16])
+            info += f" -> entry_count={cnt}, sample_count={sc}, sample_delta={sd}"
+        elif btype == b'free' and len(payload) > 0:
+            ascii_f = ''.join(chr(b) if 32 <= b < 127 else '.' for b in payload[:120])
+            info += f" -> ASCII: {ascii_f}"
+
+        boxes.append(info)
+        if btype in container_types:
+            sub_offset = pos + header_size + (4 if btype == b'meta' else 0)
+            boxes.extend(parse_mp4_boxes_detailed(data, sub_offset, pos + size, depth + 1))
+        pos += size
+    return boxes
+
+def generate_full_video_report(filepath):
+    file_size = os.path.getsize(filepath) if os.path.exists(filepath) else 0
+    probe_json = get_full_ffprobe_json(filepath)
+    with open(filepath, "rb") as f:
+        raw_bytes = f.read()
+    box_tree_str = "\n".join(parse_mp4_boxes_detailed(raw_bytes))
+
+    streams = probe_json.get("streams", [])
+    vstream = next((s for s in streams if s.get("codec_type") == "video"), {})
+    astream = next((s for s in streams if s.get("codec_type") == "audio"), {})
+    fmt = probe_json.get("format", {})
+
+    summary = {
+        "file_size_bytes": file_size,
+        "format_name": fmt.get("format_name"),
+        "duration_sec": fmt.get("duration"),
+        "overall_bit_rate": fmt.get("bit_rate"),
+        "video_codec": f"{vstream.get('codec_name')} ({vstream.get('codec_tag_string')})",
+        "video_profile_level": f"{vstream.get('profile')} / Level {vstream.get('level')}",
+        "stream_resolution": f"{vstream.get('width')}x{vstream.get('height')} (coded: {vstream.get('coded_width')}x{vstream.get('coded_height')})",
+        "pix_fmt_color": f"{vstream.get('pix_fmt')} | range={vstream.get('color_range')} | space={vstream.get('color_space')}",
+        "frame_rate": f"r_frame_rate={vstream.get('r_frame_rate')} | avg_frame_rate={vstream.get('avg_frame_rate')}",
+        "time_base": vstream.get("time_base"),
+        "video_bit_rate": vstream.get("bit_rate"),
+        "nb_frames": vstream.get("nb_frames"),
+        "extradata_size": vstream.get("extradata_size"),
+        "audio_info": f"{astream.get('codec_name')} | {astream.get('sample_rate')} Hz | {astream.get('channels')} ch | {astream.get('bit_rate')} bps"
+    }
+    return summary, box_tree_str, json.dumps(probe_json, indent=2)
 
 @app.route("/", methods=["GET"])
 def index():
     return render_template_string(HTML_TEMPLATE)
+
+@app.route("/deep_xray", methods=["POST"])
+def deep_xray():
+    if "video" not in request.files:
+        return "No video file", 400
+    f = request.files["video"]
+    ref_path = "xray_in.mp4"
+    f.save(ref_path)
+    summary, box_tree, probe_pretty = generate_full_video_report(ref_path)
+    summary_pretty = json.dumps(summary, indent=2)
+    return f"""
+    <body style="background:#121212; color:#fff; font-family:Arial; padding:25px;">
+        <h2>🔬 Complete Video Inspection Report ({f.filename})</h2>
+        <a href="/" style="color:#00e676; font-size:16px;">⬅ Back to Encoder Lab</a>
+        <h3>1. Key Video & Audio Summary:</h3>
+        <pre>{summary_pretty}</pre>
+        <h3>2. MP4 Box & Header Hierarchy (tkhd, mvhd, stsd, hvcC, fiel, pasp, btrt, udta, free):</h3>
+        <pre>{box_tree}</pre>
+        <h3>3. Complete FFprobe Streams & Format JSON:</h3>
+        <pre>{probe_pretty}</pre>
+        <a href="/" style="color:#00e676; font-size:18px;">⬅ Back</a>
+    </body>
+    """
 
 @app.route("/transcode", methods=["POST"])
 def transcode():
@@ -240,73 +391,114 @@ def transcode():
         return "No video file provided", 400
 
     video_file = request.files["video"]
+    mode = request.form.get("mode", "full_encode")
     in_path = "test_in.mp4"
     out_path = "test_out.mp4"
     video_file.save(in_path)
 
-    vinfo = probe_video_dimensions(in_path)
-    is_landscape = vinfo["width"] > vinfo["height"]
+    # 1. Inspect ALL details of the uploaded input video first!
+    in_summary, in_box_tree, in_probe_pretty = generate_full_video_report(in_path)
+    in_summary_pretty = json.dumps(in_summary, indent=2)
+
+    in_probe_data = json.loads(in_probe_pretty)
+    in_streams = in_probe_data.get("streams", [])
+    in_v = next((s for s in in_streams if s.get("codec_type") == "video"), {})
+    in_w = int(in_v.get("width") or 1080)
+    in_h = int(in_v.get("height") or 1920)
+    is_landscape = in_w > in_h
     target_w, target_h = (1920, 1080) if is_landscape else (1080, 1920)
 
-    vf_chain = (
-        f"scale={target_w}:{target_h}:flags=lanczos+accurate_rnd+full_chroma_int,"
-        "setsar=1/1,"
-        "fps=60,"
-        "format=yuvj420p"
-    )
+    if mode == "header_only":
+        import shutil
+        shutil.copyfile(in_path, out_path)
+    else:
+        vf_chain = (
+            f"scale={target_w}:{target_h}:flags=lanczos+accurate_rnd+full_chroma_int,"
+            "setsar=1/1,"
+            "fps=60,"
+            "format=yuvj420p"
+        )
 
-    x265_params = (
-        "frame-threads=2:numa-pools=2:level-idc=41:high-tier=1:ref=1:no-repeat-headers=1:no-open-gop=1:"
-        "min-keyint=60:keyint=120:bframes=2:b-adapt=0:b-pyramid=1:"
-        "rc-lookahead=5:lookahead-slices=8:scenecut=40:"
-        "ctu=64:min-cu-size=8:no-rect=1:no-amp=1:max-tu-size=32:"
-        "tu-inter-depth=1:tu-intra-depth=1:signhide=1:strong-intra-smoothing=1:"
-        "max-merge=2:limit-refs=3:me=1:subme=2:merange=57:weightp=1:no-weightb=1:"
-        "deblock=0,0:sao=1:selective-sao=4:early-skip=1:rskip=1:fast-intra=1:"
-        "psy-rd=2.00:vbv-maxrate=24000:vbv-bufsize=48000:vbv-init=0.9:"
-        "aq-mode=2:aq-strength=1.00:cutree=1:qg-size=32:sar=1:"
-        "range=full:colorprim=bt709:transfer=bt709:colormatrix=bt709:chromaloc=1:info=1"
-    )
+        x265_params = (
+            "frame-threads=2:numa-pools=2:level-idc=41:high-tier=1:ref=1:no-repeat-headers=1:no-open-gop=1:"
+            "min-keyint=60:keyint=120:bframes=2:b-adapt=0:b-pyramid=1:"
+            "rc-lookahead=5:lookahead-slices=8:scenecut=40:"
+            "ctu=64:min-cu-size=8:no-rect=1:no-amp=1:max-tu-size=32:"
+            "tu-inter-depth=1:tu-intra-depth=1:signhide=1:strong-intra-smoothing=1:"
+            "max-merge=2:limit-refs=3:me=1:subme=2:merange=57:weightp=1:no-weightb=1:"
+            "deblock=0,0:sao=1:selective-sao=4:early-skip=1:rskip=1:fast-intra=1:"
+            "psy-rd=2.00:vbv-maxrate=24000:vbv-bufsize=48000:vbv-init=0.9:"
+            "aq-mode=2:aq-strength=1.00:cutree=1:qg-size=32:sar=1:"
+            "range=full:colorprim=bt709:transfer=bt709:colormatrix=bt709:chromaloc=1:info=1"
+        )
 
-    cmd = [
-        "ffmpeg", "-y",
-        "-threads", "2",
-        "-i", in_path,
-        "-map", "0:v:0",
-        "-map", "0:a:0?",
-        "-vf", vf_chain,
-        "-fps_mode", "cfr",
-        "-r", "60",
-        "-video_track_timescale", "15360",
-        "-c:v", "libx265",
-        "-tag:v", "hvc1",
-        "-preset", "superfast",
-        "-profile:v", "main",
-        "-b:v", "22300k",
-        "-x265-params", x265_params,
-        "-pix_fmt", "yuvj420p",
-        "-color_range", "pc",
-        "-field_order", "progressive",
-        "-brand", "isom",
-        "-c:a", "aac",
-        "-b:a", "130k",
-        "-ar", "48000",
-        "-ac", "2",
-        "-movflags", "+faststart",
-        out_path
-    ]
+        cmd = [
+            "ffmpeg", "-y",
+            "-threads", "2",
+            "-i", in_path,
+            "-map", "0:v:0",
+            "-map", "0:a:0?",
+            "-vf", vf_chain,
+            "-fps_mode", "cfr",
+            "-r", "60",
+            "-video_track_timescale", "15360",
+            "-c:v", "libx265",
+            "-tag:v", "hvc1",
+            "-preset", "superfast",
+            "-profile:v", "main",
+            "-b:v", "22300k",
+            "-x265-params", x265_params,
+            "-pix_fmt", "yuvj420p",
+            "-color_range", "pc",
+            "-field_order", "progressive",
+            "-brand", "isom",
+            "-c:a", "aac",
+            "-b:a", "130k",
+            "-ar", "48000",
+            "-ac", "2",
+            "-movflags", "+faststart",
+            out_path
+        ]
 
-    res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    if res.returncode != 0:
-        return f"<pre>FFmpeg failed:\n{res.stderr[-2000:]}</pre>", 500
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if res.returncode != 0:
+            return f"<pre>FFmpeg failed:\n{res.stderr[-2000:]}</pre>", 500
 
+    # 2. Rebuild MP4 into 100% Bit-Exact Quality_3_fixed_exact_q2_style.mp4 structure!
     msg = apply_exact_quality3_fixed_structure(out_path, target_w=target_w, target_h=target_h)
+
+    # 3. Inspect ALL details of the rebuilt output video!
+    out_summary, out_box_tree, out_probe_pretty = generate_full_video_report(out_path)
+    out_summary_pretty = json.dumps(out_summary, indent=2)
 
     return f"""
     <body style="background:#121212; color:#fff; font-family:Arial; padding:25px;">
         <h2>✅ {msg}</h2>
         <a href="/download" style="font-size: 18px; background: #00e676; color: #000; font-weight: bold; padding: 14px 28px; text-decoration: none; border-radius: 6px; display: inline-block;">⬇️ Download Quality_3_fixed_exact_q2_style.mp4</a>
-        <br><br><a href="/" style="color: #bbb;">⬅ Back</a>
+        &nbsp;&nbsp;
+        <a href="/" style="color: #29b6f6; font-size: 16px;">⬅ Back to Lab</a>
+        <hr style="border-color:#333; margin:25px 0;">
+
+        <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+            <div>
+                <h3 style="color:#ff9100;">📥 Uploaded Input Video Details ({video_file.filename})</h3>
+                <h4>Input Summary:</h4>
+                <pre>{in_summary_pretty}</pre>
+                <h4>Input MP4 Box Structure:</h4>
+                <pre>{in_box_tree}</pre>
+                <h4>Input FFprobe Full JSON:</h4>
+                <pre>{in_probe_pretty}</pre>
+            </div>
+            <div>
+                <h3 style="color:#00e676;">📤 Output Video Details (Quality_3_fixed_exact_q2_style.mp4)</h3>
+                <h4>Output Summary:</h4>
+                <pre>{out_summary_pretty}</pre>
+                <h4>Output MP4 Box Structure (100% Exact Match):</h4>
+                <pre>{out_box_tree}</pre>
+                <h4>Output FFprobe Full JSON:</h4>
+                <pre>{out_probe_pretty}</pre>
+            </div>
+        </div>
     </body>
     """
 
