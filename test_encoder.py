@@ -11,7 +11,7 @@ HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>100% Exact Zilem/Compressbase 352x288 Cloner</title>
+    <title>100% Exact Website Cloner (tkhd=1080x1920, hvc1=0x0)</title>
     <style>
         body { font-family: Arial, sans-serif; padding: 25px; background: #121212; color: #fff; }
         .card { background: #1e1e1e; padding: 20px; border-radius: 10px; margin-bottom: 20px; border: 1px solid #333; }
@@ -21,15 +21,14 @@ HTML_TEMPLATE = """
     </style>
 </head>
 <body>
-    <h2>⚡ 100% Exact Website Cloner (352x288 Spoof + Zilem/Compressbase Signature)</h2>
+    <h2>⚡ 100% Exact Website Cloner (tkhd=1080x1920 + hvc1=0x0)</h2>
 
     <div class="card">
-        <h3>၁။ 4K / 2K Video ကို သူတို့ Website ဗီဒီယိုနှင့် 100% တစ်ထပ်တည်းတူအောင် ထုတ်ရန်</h3>
-        <p>ထွက်လာသော ဗီဒီယိုသည် <b>352x288px</b> ဟု ပြနေမည်ဖြစ်ပြီး ဖုန်းထဲတွင်လည်း Corrupted လုံးဝမဖြစ်ဘဲ ဖွင့်ကြည့်နိုင်ကာ Extension ဖြင့် TikTok တင်လိုက်သည်နှင့် 4K အတိုင်း ကြည်တောက်ရှင်းနေပါမည်-</p>
+        <h3>၁။ သူတို့ Website ဗီဒီယိုအတိုင်း (Gallery တွင် Play မရဘဲ Extension ဖြင့် TikTok တင်မှ 4K ထွက်သော ပုံစံ) ထုတ်ရန်</h3>
         <form action="/transcode" method="post" enctype="multipart/form-data">
             <label>4K / 2K ဗီဒီယို ရွေးချယ်ပါ:</label><br>
             <input type="file" name="video" accept="video/mp4,video/*" required><br><br>
-            <button type="submit">🚀 Generate 100% Exact 352x288 Video</button>
+            <button type="submit">🚀 Generate Exact Website Video (hvc1=0x0)</button>
         </form>
     </div>
 
@@ -44,7 +43,6 @@ HTML_TEMPLATE = """
 </html>
 """
 
-# Exact 395-byte [udta] box from the reference website video (Rein's Method / Zilem Method v5.0 / Patched by Compressbase)
 EXACT_ZILEM_UDTA_395B = (
     b"\x00\x00\x01\x8budta\x00\x00\x01\x83meta\x00\x00\x00\x00\x00\x00\x00!hdlr"
     b"\x00\x00\x00\x00\x00\x00\x00\x00mdirappl\x00\x00\x00\x00\x00\x00\x00\x00\x00"
@@ -59,53 +57,37 @@ EXACT_ZILEM_UDTA_395B = (
     b"\x00\x00/\xa9cmt\x00\x00\x00'data\x00\x00\x00\x01\x00\x00\x00\x00Patched by Compressbase"
 )
 
-# Exact 69-byte trailing [free] box from the reference website video
 EXACT_ZILEM_TRAILING_FREE_69B = (
     b"\x00\x00\x00EfreeZILEM_OPTIMIZED/1 2026-10-03T03:46:48.570Z 1001 (2)_zilem.mp4"
 )
 
-def apply_exact_website_spoof(filepath, orig_w=1080, orig_h=1920):
+def apply_exact_website_zero_patch(filepath, orig_w=1080, orig_h=1920):
     """
-    1. Safely patches video [tkhd] (+80/+84 from 'tkhd') to 352.0 x 288.0
-    2. Safely patches video [hvc1] (+28/+30 from 'hvc1') to 352 x 288
-    3. Replaces [udta] inside [moov] with EXACT_ZILEM_UDTA_395B and updates [stco] offsets
-    4. Appends EXACT_ZILEM_TRAILING_FREE_69B at the end of the file
-    Zero bitstream corruption — 100% playable on all phones, browsers, and TikTok!
+    1. Keeps video [tkhd] at 1080.0 x 1920.0 (DOES NOT touch tkhd!)
+    2. Patches video [hvc1] at EXACT offset (+28 and +30 from 'hvc1') to 0 x 0!
+       - Causes Phone Gallery to refuse playback (0x0 dimensions)
+       - Causes Browser/TikTok to read 352x288 CIF fallback
+       - Extension V7Patch restores 0x0 -> 1080x1920 from tkhd on upload!
+    3. Injects Zilem/Compressbase [udta] and trailing [free] box.
     """
     with open(filepath, "rb") as f:
         data = bytearray(f.read())
 
-    logs = []
+    logs = ["tkhd kept at 1080.0x1920.0"]
 
-    # 1. Patch Video [tkhd] to 352.0 x 288.0 (at +80/+84 from 'tkhd' tag for v0)
-    orig_tkhd_wh = struct.pack(">II", orig_w << 16, orig_h << 16)
-    spoof_tkhd_wh = struct.pack(">II", 352 << 16, 288 << 16)
-    idx = 0
-    while True:
-        pos = data.find(b"tkhd", idx)
-        if pos == -1:
-            break
-        ver = data[pos + 4]
-        w_off = (pos + 92) if ver == 1 else (pos + 80)
-        if w_off + 8 <= len(data) and data[w_off:w_off+8] == orig_tkhd_wh:
-            data[w_off:w_off+8] = spoof_tkhd_wh
-            logs.append("tkhd -> 352.0x288.0")
-        idx = pos + 4
-
-    # 2. Patch Video [hvc1] SampleEntry width/height at EXACT offset (+28 and +30 from 'hvc1') to 352x288!
+    # Patch Video [hvc1] SampleEntry width/height at EXACT offset (+28 and +30 from 'hvc1') to 0x0!
     orig_hvc1_wh = struct.pack(">HH", orig_w, orig_h)
-    spoof_hvc1_wh = struct.pack(">HH", 352, 288)
     idx = 0
     while True:
         pos = data.find(b"hvc1\x00\x00\x00\x00\x00\x00", idx)
         if pos == -1:
             break
         if pos + 32 <= len(data) and data[pos+28:pos+32] == orig_hvc1_wh:
-            data[pos+28:pos+32] = spoof_hvc1_wh
-            logs.append("hvc1 (+28/+30) -> 352x288")
+            data[pos+28:pos+32] = b"\x00\x00\x00\x00"
+            logs.append("hvc1 (+28/+30) -> 0x0")
         idx = pos + 4
 
-    # 3. Inject EXACT_ZILEM_UDTA_395B into [moov] and adjust [stco] chunk offsets
+    # Inject EXACT_ZILEM_UDTA_395B into [moov] and adjust [stco] chunk offsets
     pos = 0
     end = len(data)
     moov_pos = -1
@@ -180,11 +162,9 @@ def apply_exact_website_spoof(filepath, orig_w=1080, orig_h=1920):
         out_data.extend(new_moov)
         out_data.extend(data[moov_end:])
         data = out_data
-        logs.append("udta -> Zilem/Compressbase (395B)")
+        logs.append("udta -> Zilem/Compressbase")
 
-    # 4. Append exact 69-byte trailing ZILEM_OPTIMIZED free box
     data.extend(EXACT_ZILEM_TRAILING_FREE_69B)
-    logs.append("trailing free -> ZILEM_OPTIMIZED (69B)")
 
     with open(filepath, "wb") as f:
         f.write(data)
@@ -227,9 +207,8 @@ def parse_mp4_boxes(data, offset=0, end=None, depth=0):
             entry_size = struct.unpack(">I", payload[8:12])[0]
             entry_type = payload[12:16].decode('latin1', errors='replace')
             if len(payload) >= 44:
-                # Correct offset inside stsd payload: 8 (stsd header) + 28 (from entry type) = 36..40!
                 vw, vh = struct.unpack(">HH", payload[36:40])
-                info += f" -> sample_entry={entry_type}, coded_width={vw}, coded_height={vh}"
+                info += f" -> sample_entry={entry_type}, hvc1_width(+28)={vw}, hvc1_height(+30)={vh}"
             sub_start = pos + header_size + 8 + 86
             sub_end = pos + header_size + 8 + entry_size
             if sub_end <= pos + size and sub_start < sub_end:
@@ -289,7 +268,6 @@ def transcode():
     out_path = "test_out.mp4"
     video_file.save(in_path)
 
-    # 1. Exact filter chain: 1080x1920 Lanczos + SAR 1:1 (creates pasp box) + 60 FPS + yuvj420p
     vf_chain = (
         "scale=1080:1920:flags=lanczos+accurate_rnd+full_chroma_int,"
         "setsar=1/1,"
@@ -297,7 +275,6 @@ def transcode():
         "format=yuvj420p"
     )
 
-    # 2. Exact x265 options extracted directly from the reference video's hvcC SEI string!
     x265_params = (
         "level-idc=41:high-tier=1:ref=1:no-repeat-headers=1:no-open-gop=1:"
         "min-keyint=60:keyint=120:bframes=2:b-adapt=0:b-pyramid=1:"
@@ -340,8 +317,8 @@ def transcode():
     if res.returncode != 0:
         return f"<pre>FFmpeg failed:\n{res.stderr[-2000:]}</pre>", 500
 
-    # 3. Apply the exact 352x288 spoof (tkhd + hvc1 at +28/+30) + Zilem/Compressbase udta & trailing free box!
-    patch_log = apply_exact_website_spoof(out_path, orig_w=1080, orig_h=1920)
+    # Apply the EXACT website zero-patch (tkhd=1080x1920, hvc1=+28/+30 -> 0x0)
+    patch_log = apply_exact_website_zero_patch(out_path, orig_w=1080, orig_h=1920)
 
     with open(out_path, "rb") as fp:
         raw_out = fp.read()
@@ -351,7 +328,7 @@ def transcode():
     return f"""
     <body style="background:#121212; color:#fff; font-family:Arial; padding:25px;">
         <h2>✅ 100% Exact Website Clone Ready! ({patch_log})</h2>
-        <a href="/download" style="font-size: 18px; background: #00e676; color: #000; font-weight: bold; padding: 14px 28px; text-decoration: none; border-radius: 6px; display: inline-block;">⬇️ Download 352x288 Website Clone Video</a>
+        <a href="/download" style="font-size: 18px; background: #00e676; color: #000; font-weight: bold; padding: 14px 28px; text-decoration: none; border-radius: 6px; display: inline-block;">⬇️ Download Exact Website Clone (hvc1=0x0)</a>
         <br><br>
         <h4>Generated Video X-Ray Verification:</h4>
         <pre>{box_tree}</pre>
@@ -363,7 +340,7 @@ def transcode():
 @app.route("/download", methods=["GET"])
 def download():
     if os.path.exists("test_out.mp4"):
-        return send_file("test_out.mp4", as_attachment=True, download_name="spoofed_352x288_hq.mp4")
+        return send_file("test_out.mp4", as_attachment=True, download_name="exact_website_clone_0x0.mp4")
     return "File not found", 404
 
 if __name__ == "__main__":
