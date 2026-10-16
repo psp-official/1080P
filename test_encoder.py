@@ -11,7 +11,7 @@ HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>100% Exact Website Cloner (tkhd=1080x1920, hvc1=0x0)</title>
+    <title>100% Exact Q2 Style Cloner (tkhd=1080x1920, hvc1=0x0)</title>
     <style>
         body { font-family: Arial, sans-serif; padding: 25px; background: #121212; color: #fff; }
         .card { background: #1e1e1e; padding: 20px; border-radius: 10px; margin-bottom: 20px; border: 1px solid #333; }
@@ -21,19 +21,20 @@ HTML_TEMPLATE = """
     </style>
 </head>
 <body>
-    <h2>⚡ 100% Exact Website Cloner (tkhd=1080x1920 + hvc1=0x0)</h2>
+    <h2>⚡ 100% Exact Q2 Style Cloner (fixed_exact_q2_style.mp4 Formula)</h2>
 
     <div class="card">
-        <h3>၁။ သူတို့ Website ဗီဒီယိုအတိုင်း (Gallery တွင် Play မရဘဲ Extension ဖြင့် TikTok တင်မှ 4K ထွက်သော ပုံစံ) ထုတ်ရန်</h3>
+        <h3>၁။ 4K / 2K Video ကို Phone Gallery တွင် Play မရဘဲ Extension ဖြင့် TikTok တင်မှ 4K ထွက်သော ပုံစံအတိအကျ ထုတ်ရန်</h3>
+        <p>ဤစနစ်သည် <b>tkhd = 1080x1920</b> ထားပြီး <b>hvc1 (+28/+30) = 0x0</b> သို့ ပြောင်းပေးသဖြင့် <code>fixed_exact_q2_style.mp4</code> အတိုင်း 100% တစ်ထပ်တည်း ထွက်လာပါမည်-</p>
         <form action="/transcode" method="post" enctype="multipart/form-data">
             <label>4K / 2K ဗီဒီယို ရွေးချယ်ပါ:</label><br>
             <input type="file" name="video" accept="video/mp4,video/*" required><br><br>
-            <button type="submit">🚀 Generate Exact Website Video (hvc1=0x0)</button>
+            <button type="submit">🚀 Generate Exact Q2 Style Video (hvc1=0x0)</button>
         </form>
     </div>
 
     <div class="card">
-        <h3>၂။ Deep X-Ray Inspector</h3>
+        <h3>၂။ Deep X-Ray Inspector (ထွက်လာသော ဗီဒီယိုကို ပြန်စစ်ရန်)</h3>
         <form action="/deep_xray" method="post" enctype="multipart/form-data">
             <input type="file" name="video" accept="video/mp4,video/*" required><br><br>
             <button type="submit" style="background: #ff9100;">🔍 Run Deep X-Ray</button>
@@ -61,53 +62,84 @@ EXACT_ZILEM_TRAILING_FREE_69B = (
     b"\x00\x00\x00EfreeZILEM_OPTIMIZED/1 2026-10-03T03:46:48.570Z 1001 (2)_zilem.mp4"
 )
 
-def apply_exact_website_zero_patch(filepath, orig_w=1080, orig_h=1920):
+def probe_video_dimensions(filepath):
+    info = {"width": 1080, "height": 1920}
+    try:
+        cmd = [
+            "ffprobe", "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=width,height",
+            "-of", "json", filepath
+        ]
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=15)
+        if res.returncode == 0:
+            data = json.loads(res.stdout)
+            streams = data.get("streams", [])
+            if streams:
+                info["width"] = int(streams[0].get("width") or 1080)
+                info["height"] = int(streams[0].get("height") or 1920)
+    except Exception:
+        pass
+    return info
+
+def apply_exact_q2_style_zero_patch(filepath, target_w=1080, target_h=1920):
     """
-    1. Keeps video [tkhd] at 1080.0 x 1920.0 (DOES NOT touch tkhd!)
+    Identical to fixed_exact_q2_style.mp4:
+    1. Keeps video [tkhd] at target_w x target_h (1080.0 x 1920.0)
     2. Patches video [hvc1] at EXACT offset (+28 and +30 from 'hvc1') to 0 x 0!
-       - Causes Phone Gallery to refuse playback (0x0 dimensions)
-       - Causes Browser/TikTok to read 352x288 CIF fallback
-       - Extension V7Patch restores 0x0 -> 1080x1920 from tkhd on upload!
-    3. Injects Zilem/Compressbase [udta] and trailing [free] box.
+       - Phone Gallery cannot play it because stsd hvc1 width/height = 0x0
+       - Browser / TikTok Web reads 352x288 CIF fallback
+       - Extension restores 0x0 -> 1080x1920 from tkhd and passes 100% original HEVC stream!
+    3. Injects EXACT_ZILEM_UDTA_395B into [moov] and updates [stco]/[co64] offsets
+    4. Appends EXACT_ZILEM_TRAILING_FREE_69B at the end of the file
     """
     with open(filepath, "rb") as f:
         data = bytearray(f.read())
 
-    logs = ["tkhd kept at 1080.0x1920.0"]
+    logs = []
 
-    # Patch Video [hvc1] SampleEntry width/height at EXACT offset (+28 and +30 from 'hvc1') to 0x0!
-    orig_hvc1_wh = struct.pack(">HH", orig_w, orig_h)
+    # 1. Ensure video [tkhd] is target_w x target_h (1080x1920 or 1920x1080)
+    pos = data.find(b"tkhd")
+    if pos != -1:
+        ver = data[pos + 4]
+        w_off = (pos + 92) if ver == 1 else (pos + 80)
+        if w_off + 8 <= len(data):
+            struct.pack_into(">II", data, w_off, target_w << 16, target_h << 16)
+            logs.append(f"tkhd={target_w}.0x{target_h}.0")
+
+    # 2. Patch Video [hvc1] SampleEntry width/height at EXACT offset (+28 and +30 from 'hvc1') to 0x0!
     idx = 0
     while True:
-        pos = data.find(b"hvc1\x00\x00\x00\x00\x00\x00", idx)
-        if pos == -1:
+        hpos = data.find(b"hvc1\x00\x00\x00\x00\x00\x00", idx)
+        if hpos == -1:
             break
-        if pos + 32 <= len(data) and data[pos+28:pos+32] == orig_hvc1_wh:
-            data[pos+28:pos+32] = b"\x00\x00\x00\x00"
-            logs.append("hvc1 (+28/+30) -> 0x0")
-        idx = pos + 4
+        if hpos + 32 <= len(data):
+            old_w, old_h = struct.unpack(">HH", data[hpos+28:hpos+32])
+            data[hpos+28:hpos+32] = b"\x00\x00\x00\x00"
+            logs.append(f"hvc1(+28/+30): {old_w}x{old_h}->0x0")
+        idx = hpos + 4
 
-    # Inject EXACT_ZILEM_UDTA_395B into [moov] and adjust [stco] chunk offsets
-    pos = 0
+    # 3. Inject EXACT_ZILEM_UDTA_395B into [moov] and adjust [stco]/[co64] chunk offsets
+    p = 0
     end = len(data)
     moov_pos = -1
     moov_size = 0
     mdat_pos = -1
-    while pos + 8 <= end:
-        sz = struct.unpack(">I", data[pos:pos+4])[0]
-        tp = bytes(data[pos+4:pos+8])
+    while p + 8 <= end:
+        sz = struct.unpack(">I", data[p:p+4])[0]
+        tp = bytes(data[p+4:p+8])
         if sz == 1:
-            sz = struct.unpack(">Q", data[pos+8:pos+16])[0]
+            sz = struct.unpack(">Q", data[p+8:p+16])[0]
         elif sz == 0:
-            sz = end - pos
+            sz = end - p
         if tp == b"moov":
-            moov_pos = pos
+            moov_pos = p
             moov_size = sz
         elif tp == b"mdat":
-            mdat_pos = pos
+            mdat_pos = p
         if sz < 8:
             break
-        pos += sz
+        p += sz
 
     if moov_pos != -1:
         moov_end = moov_pos + moov_size
@@ -130,30 +162,30 @@ def apply_exact_website_zero_patch(filepath, orig_w=1080, orig_h=1920):
 
         if mdat_pos != -1 and moov_pos < mdat_pos and delta != 0:
             def fix_offsets(buf, start, end_idx):
-                p = start
+                cur = start
                 containers = {b"trak", b"mdia", b"minf", b"stbl", b"edts", b"dinf"}
-                while p + 8 <= end_idx:
-                    bsz = struct.unpack(">I", buf[p:p+4])[0]
-                    btp = bytes(buf[p+4:p+8])
-                    if bsz < 8 or p + bsz > end_idx:
+                while cur + 8 <= end_idx:
+                    bsz = struct.unpack(">I", buf[cur:cur+4])[0]
+                    btp = bytes(buf[cur+4:cur+8])
+                    if bsz < 8 or cur + bsz > end_idx:
                         break
                     if btp in containers:
-                        fix_offsets(buf, p + 8, p + bsz)
+                        fix_offsets(buf, cur + 8, cur + bsz)
                     elif btp == b"stco":
-                        cnt = struct.unpack(">I", buf[p+12:p+16])[0]
+                        cnt = struct.unpack(">I", buf[cur+12:cur+16])[0]
                         for k in range(cnt):
-                            op = p + 16 + k * 4
-                            if op + 4 <= p + bsz:
+                            op = cur + 16 + k * 4
+                            if op + 4 <= cur + bsz:
                                 old_v = struct.unpack(">I", buf[op:op+4])[0]
                                 struct.pack_into(">I", buf, op, old_v + delta)
                     elif btp == b"co64":
-                        cnt = struct.unpack(">I", buf[p+12:p+16])[0]
+                        cnt = struct.unpack(">I", buf[cur+12:cur+16])[0]
                         for k in range(cnt):
-                            op = p + 16 + k * 8
-                            if op + 8 <= p + bsz:
+                            op = cur + 16 + k * 8
+                            if op + 8 <= cur + bsz:
                                 old_v = struct.unpack(">Q", buf[op:op+8])[0]
                                 struct.pack_into(">Q", buf, op, old_v + delta)
-                    p += bsz
+                    cur += bsz
             fix_offsets(new_moov_children, 0, len(new_moov_children))
 
         new_moov = struct.pack(">I4s", new_moov_size, b"moov") + bytes(new_moov_children)
@@ -162,9 +194,10 @@ def apply_exact_website_zero_patch(filepath, orig_w=1080, orig_h=1920):
         out_data.extend(new_moov)
         out_data.extend(data[moov_end:])
         data = out_data
-        logs.append("udta -> Zilem/Compressbase")
+        logs.append("udta=395B(Zilem/Compressbase)")
 
     data.extend(EXACT_ZILEM_TRAILING_FREE_69B)
+    logs.append("free=69B(ZILEM_OPTIMIZED)")
 
     with open(filepath, "wb") as f:
         f.write(data)
@@ -268,8 +301,12 @@ def transcode():
     out_path = "test_out.mp4"
     video_file.save(in_path)
 
+    vinfo = probe_video_dimensions(in_path)
+    is_landscape = vinfo["width"] > vinfo["height"]
+    target_w, target_h = (1920, 1080) if is_landscape else (1080, 1920)
+
     vf_chain = (
-        "scale=1080:1920:flags=lanczos+accurate_rnd+full_chroma_int,"
+        f"scale={target_w}:{target_h}:flags=lanczos+accurate_rnd+full_chroma_int,"
         "setsar=1/1,"
         "fps=60,"
         "format=yuvj420p"
@@ -317,8 +354,8 @@ def transcode():
     if res.returncode != 0:
         return f"<pre>FFmpeg failed:\n{res.stderr[-2000:]}</pre>", 500
 
-    # Apply the EXACT website zero-patch (tkhd=1080x1920, hvc1=+28/+30 -> 0x0)
-    patch_log = apply_exact_website_zero_patch(out_path, orig_w=1080, orig_h=1920)
+    # Apply the exact Q2 style zero-patch (tkhd=1080x1920, hvc1=+28/+30 -> 0x0)
+    patch_log = apply_exact_q2_style_zero_patch(out_path, target_w=target_w, target_h=target_h)
 
     with open(out_path, "rb") as fp:
         raw_out = fp.read()
@@ -327,8 +364,9 @@ def transcode():
 
     return f"""
     <body style="background:#121212; color:#fff; font-family:Arial; padding:25px;">
-        <h2>✅ 100% Exact Website Clone Ready! ({patch_log})</h2>
-        <a href="/download" style="font-size: 18px; background: #00e676; color: #000; font-weight: bold; padding: 14px 28px; text-decoration: none; border-radius: 6px; display: inline-block;">⬇️ Download Exact Website Clone (hvc1=0x0)</a>
+        <h2>✅ 100% Exact Q2 Style Video Ready! ({patch_log})</h2>
+        <p>Phone Gallery တွင် ဖွင့်ကြည့်၍ မရဘဲ Extension ဖြင့် TikTok တင်လိုက်သည်နှင့် 4K အတိုင်း ကြည်တောက်ရှင်းနေပါမည်!</p>
+        <a href="/download" style="font-size: 18px; background: #00e676; color: #000; font-weight: bold; padding: 14px 28px; text-decoration: none; border-radius: 6px; display: inline-block;">⬇️ Download fixed_exact_q2_style.mp4</a>
         <br><br>
         <h4>Generated Video X-Ray Verification:</h4>
         <pre>{box_tree}</pre>
@@ -340,7 +378,7 @@ def transcode():
 @app.route("/download", methods=["GET"])
 def download():
     if os.path.exists("test_out.mp4"):
-        return send_file("test_out.mp4", as_attachment=True, download_name="exact_website_clone_0x0.mp4")
+        return send_file("test_out.mp4", as_attachment=True, download_name="fixed_exact_q2_style.mp4")
     return "File not found", 404
 
 if __name__ == "__main__":
