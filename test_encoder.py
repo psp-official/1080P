@@ -1,3 +1,5 @@
+from datetime import datetime
+import uuid
 import os
 import struct
 import subprocess
@@ -224,7 +226,11 @@ def apply_exact_quality3_fixed_structure(filepath, target_w=1080, target_h=1920)
         f.write(new_moov_box)
         f.write(EXACT_Q3_FREE_8B)
         f.write(mdat_bytes)
-        f.write(EXACT_Q3_TAIL_FREE_69B)
+        now_iso = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.%f")[:23] + "Z"
+        rand_id = str(uuid.uuid4().int)[:4]
+        dyn_tail_str = f"ZILEM_OPTIMIZED/1 {now_iso} {rand_id} (2)_zilem.mp4".encode("ascii")
+        dyn_tail_box = struct.pack(">I4s", 69, b"free") + dyn_tail_str[:61].ljust(61, b" ")
+        f.write(dyn_tail_box)
 
     return f"Rebuilt to Exact Quality_3_fixed_exact_q2_style (moov={new_moov_size}B, delta={delta}B)"
 
