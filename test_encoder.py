@@ -1,554 +1,55 @@
 from datetime import datetime
 import uuid
 import os
-import re
-import time
 import struct
-import shutil
-import threading
 import subprocess
 import json
 import binascii
-from flask import Flask, request, render_template_string, send_file, jsonify
+from flask import Flask, request, render_template_string, send_file
 
 app = Flask(__name__)
 
-JOBS_DIR = "/tmp/test_encoder_jobs"
-os.makedirs(JOBS_DIR, exist_ok=True)
-
-# Global dictionary to store real-time job progress, ETA, stage, and inspection reports
-JOBS = {}
-
-HTML_TEMPLATE = r"""<!DOCTYPE html>
-<html lang="my">
+HTML_TEMPLATE = """
+<!DOCTYPE html>
+<html>
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>⚡ 2K/4K HQ Video Studio — Quality_3_fixed_exact_q2_style</title>
+    <title>Quality_3_fixed_exact_q2_style Encoder & Deep Inspector</title>
     <style>
-        :root {
-            --bg: #0b0d12;
-            --card: #131722;
-            --card-border: #22293a;
-            --accent: #00e676;
-            --accent-glow: rgba(0, 230, 118, 0.28);
-            --blue: #29b6f6;
-            --orange: #ff9100;
-            --text: #f1f5f9;
-            --muted: #94a3b8;
-        }
-        * { box-sizing: border-box; }
-        body {
-            margin: 0;
-            padding: 28px 16px 60px;
-            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: radial-gradient(circle at top, #172033 0%, var(--bg) 60%);
-            color: var(--text);
-            min-height: 100vh;
-        }
-        .container { max-width: 1120px; margin: 0 auto; }
-        .header {
-            text-align: center;
-            margin-bottom: 28px;
-        }
-        .header h1 {
-            margin: 0 0 8px;
-            font-size: 24px;
-            font-weight: 800;
-            background: linear-gradient(90deg, #00e676, #29b6f6);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-        }
-        .header p { margin: 0; color: var(--muted); font-size: 13.5px; }
-
-        .card {
-            background: var(--card);
-            border: 1px solid var(--card-border);
-            border-radius: 16px;
-            padding: 24px;
-            margin-bottom: 22px;
-            box-shadow: 0 12px 32px rgba(0,0,0,0.35);
-        }
-        .card h3 {
-            margin: 0 0 10px;
-            font-size: 17px;
-            display: flex;
-            align-items: center;
-            gap: 8px;
-        }
-        .subtext { color: var(--muted); font-size: 13px; margin: 0 0 18px; line-height: 1.5; }
-
-        .drop-zone {
-            border: 2px dashed #2e3852;
-            border-radius: 14px;
-            padding: 28px 20px;
-            text-align: center;
-            background: rgba(255,255,255,0.015);
-            cursor: pointer;
-            transition: all 0.25s ease;
-            margin-bottom: 16px;
-        }
-        .drop-zone:hover, .drop-zone.dragover {
-            border-color: var(--accent);
-            background: rgba(0, 230, 118, 0.05);
-        }
-        .drop-zone input[type="file"] { display: none; }
-        .drop-title { font-weight: 700; font-size: 15px; margin-bottom: 4px; color: #fff; }
-        .drop-sub { font-size: 12.5px; color: var(--muted); }
-        .selected-file {
-            margin-top: 10px;
-            display: inline-block;
-            padding: 6px 12px;
-            border-radius: 999px;
-            background: rgba(41, 182, 246, 0.14);
-            color: var(--blue);
-            font-size: 12.5px;
-            font-weight: 600;
-        }
-
-        .controls-row {
-            display: grid;
-            grid-template-columns: 1fr auto;
-            gap: 14px;
-            align-items: center;
-        }
-        @media (max-width: 680px) { .controls-row { grid-template-columns: 1fr; } }
-
-        select {
-            width: 100%;
-            padding: 13px 14px;
-            background: #1a2030;
-            color: #fff;
-            border: 1px solid #2e3852;
-            border-radius: 10px;
-            font-size: 13.5px;
-            outline: none;
-        }
-        .btn {
-            padding: 13px 26px;
-            background: linear-gradient(135deg, #00e676, #00c853);
-            color: #04120a;
-            font-weight: 800;
-            font-size: 14px;
-            border: none;
-            border-radius: 10px;
-            cursor: pointer;
-            box-shadow: 0 4px 18px var(--accent-glow);
-            transition: transform 0.15s ease, opacity 0.2s ease;
-            white-space: nowrap;
-        }
-        .btn:hover { transform: translateY(-1px); }
-        .btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
-        .btn-blue {
-            background: linear-gradient(135deg, #29b6f6, #0288d1);
-            color: #fff;
-            box-shadow: 0 4px 18px rgba(41, 182, 246, 0.3);
-        }
-
-        /* Progress Bar Section */
-        .progress-panel {
-            display: none;
-            margin-top: 22px;
-            padding: 18px 20px;
-            border-radius: 12px;
-            background: #0d1018;
-            border: 1px solid #242c40;
-        }
-        .progress-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 10px;
-            font-size: 13.5px;
-            font-weight: 700;
-        }
-        .progress-stage { color: var(--accent); display: flex; align-items: center; gap: 8px; }
-        .progress-stats { color: var(--blue); font-family: monospace; font-size: 13px; }
-        .bar-track {
-            width: 100%;
-            height: 14px;
-            background: #1a2130;
-            border-radius: 999px;
-            overflow: hidden;
-            position: relative;
-        }
-        .bar-fill {
-            height: 100%;
-            width: 0%;
-            background: linear-gradient(90deg, #00e676, #29b6f6);
-            border-radius: 999px;
-            transition: width 0.25s ease;
-        }
-        .progress-meta {
-            display: flex;
-            justify-content: space-between;
-            margin-top: 8px;
-            font-size: 12px;
-            color: var(--muted);
-        }
-
-        /* Ready / Download Section */
-        .result-banner {
-            display: none;
-            margin-top: 20px;
-            padding: 20px;
-            border-radius: 14px;
-            background: rgba(0, 230, 118, 0.07);
-            border: 1px solid rgba(0, 230, 118, 0.35);
-            text-align: center;
-        }
-        .result-banner h4 { margin: 0 0 12px; color: var(--accent); font-size: 16px; }
-        .dl-actions { display: flex; justify-content: center; gap: 14px; flex-wrap: wrap; }
-
-        /* Side-by-Side Details Grid */
-        .details-section { display: none; margin-top: 24px; }
-        .grid-2 {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 18px;
-        }
-        @media (max-width: 920px) { .grid-2 { grid-template-columns: 1fr; } }
-        pre {
-            background: #07090e;
-            color: #00e676;
-            padding: 14px;
-            border-radius: 10px;
-            border: 1px solid #1e2638;
-            overflow-x: auto;
-            font-size: 11.5px;
-            line-height: 1.45;
-            max-height: 420px;
-            white-space: pre-wrap;
-            word-break: break-all;
-        }
-        .section-tag {
-            display: inline-block;
-            padding: 4px 10px;
-            border-radius: 6px;
-            font-size: 11.5px;
-            font-weight: 700;
-            margin-bottom: 8px;
-        }
-        .tag-in { background: rgba(255, 145, 0, 0.15); color: var(--orange); }
-        .tag-out { background: rgba(0, 230, 118, 0.15); color: var(--accent); }
+        body { font-family: Arial, sans-serif; padding: 25px; background: #121212; color: #fff; }
+        .card { background: #1e1e1e; padding: 20px; border-radius: 10px; margin-bottom: 20px; border: 1px solid #333; }
+        button { padding: 12px 24px; background: #00e676; color: #000; font-weight: bold; border: none; border-radius: 6px; cursor: pointer; }
+        input, select { padding: 10px; margin: 10px 0; width: 100%; max-width: 480px; background: #2c2c2c; color: #fff; border: 1px solid #444; border-radius: 5px; }
+        pre { background: #000; color: #0f0; padding: 15px; border-radius: 6px; overflow-x: auto; font-size: 12px; white-space: pre-wrap; word-break: break-all; }
+        .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+        @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+        .badge { display: inline-block; padding: 4px 10px; border-radius: 4px; background: #29b6f6; color: #000; font-weight: bold; font-size: 12px; margin-right: 6px; }
     </style>
 </head>
 <body>
-<div class="container">
-    <div class="header">
-        <h1>⚡ 2K/4K HQ Video Studio & Deep Inspector</h1>
-        <p>Quality_3_fixed_exact_q2_style Formula • Real-Time Upload, Encode & Download Progress (%) + ETA</p>
-    </div>
+    <h2>⚡ 2K/4K Auto-Encoder & Full Video Inspector (Quality_3_fixed_exact_q2_style Formula)</h2>
 
     <div class="card">
-        <h3>🎬 ၁။ ဗီဒီယို အမြန်ထုတ်ယူရန် (Encode & Download with Live % Progress)</h3>
-        <p class="subtext">
-            မည်သည့် 2K / 4K / 1080p ဗီဒီယိုကိုမဆို <b>Quality_3_fixed_exact_q2_style.mp4</b> ဖွဲ့စည်းပုံအတိအကျသို့ ပြောင်းလဲပြီး တိုက်ရိုက် ဒေါင်းလုဒ်ဆွဲယူနိုင်ပါသည်။ Upload %, Encode % (ကြာချိန် ETA) နှင့် Download % တို့ကို အတန်းလေးဖြင့် တိကျစွာ ပြသပေးပါသည်။
-        </p>
-
-        <div class="drop-zone" id="dropZone" onclick="document.getElementById('videoInput').click()">
-            <input type="file" id="videoInput" accept="video/mp4,video/*">
-            <div class="drop-title">📁 ဗီဒီယိုဖိုင် ရွေးချယ်ရန် နှိပ်ပါ (သို့မဟုတ်) ဆွဲထည့်ပါ</div>
-            <div class="drop-sub">Supports 1080p, 2K (1440p), 4K (2160p) @ 60FPS / 120FPS MP4 & MOV</div>
-            <div id="selectedFileBadge" class="selected-file" style="display:none;"></div>
-        </div>
-
-        <div class="controls-row">
-            <select id="encodeMode">
-                <option value="full_encode">🔥 Mode 1: Full 2K/4K ➔ 1080p60 HEVC (22.3 Mbps) Encode + Quality_3 Exact Rebuild</option>
-                <option value="header_only">⚡ Mode 2: Instant 1-Sec Header & Box Rebuild Only (Encode လုပ်ပြီးသား HEVC ဖိုင်များအတွက်)</option>
-            </select>
-            <button class="btn" id="startBtn" onclick="startProcess()">🚀 Start Encode & Extract Video</button>
-        </div>
-
-        <!-- Real-Time Progress Bar for Upload -> Encode -> Download -->
-        <div class="progress-panel" id="progressPanel">
-            <div class="progress-header">
-                <div class="progress-stage" id="stageText">⏳ Initializing...</div>
-                <div class="progress-stats" id="pctText">0%</div>
-            </div>
-            <div class="bar-track">
-                <div class="bar-fill" id="barFill"></div>
-            </div>
-            <div class="progress-meta">
-                <span id="detailMeta">Preparing video pipeline...</span>
-                <span id="etaMeta">ETA: Calculating...</span>
-            </div>
-        </div>
-
-        <!-- Download Ready Box -->
-        <div class="result-banner" id="resultBanner">
-            <h4 id="resultTitle">✅ ဗီဒီယို ပြောင်းလဲမှု 100% အောင်မြင်ပါသည်!</h4>
-            <div class="dl-actions">
-                <button class="btn" id="downloadBtn" onclick="downloadOutputWithProgress()">⬇️ Download Video Now (With % Progress)</button>
-                <button class="btn btn-blue" onclick="toggleDetails()">🔍 View Full Input vs. Output X-Ray Details</button>
-            </div>
-        </div>
-
-        <!-- Side by Side Full Video Details -->
-        <div class="details-section" id="detailsSection">
-            <div class="grid-2">
-                <div>
-                    <span class="section-tag tag-in">📥 Uploaded Input Video Details</span>
-                    <h4>Input Summary</h4>
-                    <pre id="inSummaryPre"></pre>
-                    <h4>Input MP4 Box Structure</h4>
-                    <pre id="inBoxPre"></pre>
-                    <h4>Input FFprobe Full JSON</h4>
-                    <pre id="inProbePre"></pre>
-                </div>
-                <div>
-                    <span class="section-tag tag-out">📤 Output Video Details (Quality_3_fixed_exact_q2_style)</span>
-                    <h4>Output Summary</h4>
-                    <pre id="outSummaryPre"></pre>
-                    <h4>Output MP4 Box Structure (100% Exact Match)</h4>
-                    <pre id="outBoxPre"></pre>
-                    <h4>Output FFprobe Full JSON</h4>
-                    <pre id="outProbePre"></pre>
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <div class="card">
-        <h3>🔬 ၂။ Standalone Deep X-Ray Inspector (Encode မလုပ်ဘဲ ဗီဒီယိုဖိုင် အချက်အလက်အကုန် စစ်ဆေးရန်)</h3>
-        <form action="/deep_xray" method="post" enctype="multipart/form-data">
-            <input type="file" name="video" accept="video/mp4,video/*" required style="margin-bottom:12px; color:#fff;">
-            <button type="submit" class="btn" style="background: linear-gradient(135deg, #ff9100, #ff6d00); color:#000;">🔍 Inspect All Video Details</button>
+        <h3>၁။ မည်သည့် 2K / 4K Video ကိုမဆို Quality_3_fixed_exact_q2_style.mp4 ပုံစံအတိအကျ ပြောင်းရန် + အချက်အလက်အသေးစိတ် ကြည့်ရန်</h3>
+        <p>ဗီဒီယိုတင်လိုက်သည်နှင့် မူရင်းဗီဒီယို၏ အချက်အလက်အကုန် (Input Details) နှင့် ပြောင်းလဲပြီးသား ဗီဒီယို၏ အချက်အလက်အကုန် (Output X-Ray, MP4 Box Structure, Hex Dump & FFprobe JSON) တို့ကို နှိုင်းယှဉ်ပြသပေးပါမည်-</p>
+        <form action="/transcode" method="post" enctype="multipart/form-data">
+            <label>2K / 4K / 1080p ဗီဒီယို ရွေးချယ်ပါ:</label><br>
+            <input type="file" name="video" accept="video/mp4,video/*" required><br>
+            <label>Mode ရွေးချယ်ပါ:</label><br>
+            <select name="mode">
+                <option value="full_encode">Mode 1: Full 2K/4K -> 1080p60 HEVC Encode + Quality_3_fixed_exact_q2_style Rebuild</option>
+                <option value="header_only">Mode 2: Instant Structure & Header Rebuild Only (No Re-encode, For Already Encoded HEVC Videos)</option>
+            </select><br><br>
+            <button type="submit">🚀 Encode & Show Full Video Details</button>
         </form>
     </div>
-</div>
 
-<script>
-let selectedFile = null;
-let currentJobId = null;
-let currentDownloadFilename = "Quality_3_fixed_exact_q2_style.mp4";
-let pollTimer = null;
-
-const videoInput = document.getElementById('videoInput');
-const dropZone = document.getElementById('dropZone');
-const badge = document.getElementById('selectedFileBadge');
-
-videoInput.addEventListener('change', (e) => {
-    if (e.target.files && e.target.files[0]) {
-        selectFile(e.target.files[0]);
-    }
-});
-
-dropZone.addEventListener('dragover', (e) => {
-    e.preventDefault();
-    dropZone.classList.add('dragover');
-});
-dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
-dropZone.addEventListener('drop', (e) => {
-    e.preventDefault();
-    dropZone.classList.remove('dragover');
-    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
-        selectFile(e.dataTransfer.files[0]);
-    }
-});
-
-function formatBytes(bytes) {
-    if (!bytes || bytes === 0) return '0 B';
-    const k = 1024;
-    const sizes = ['B', 'KB', 'MB', 'GB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
-}
-
-function formatTime(sec) {
-    if (!isFinite(sec) || sec < 0) return 'Calculating...';
-    sec = Math.round(sec);
-    if (sec < 60) return sec + 's';
-    const m = Math.floor(sec / 60);
-    const s = sec % 60;
-    return m + 'm ' + s + 's';
-}
-
-function selectFile(file) {
-    selectedFile = file;
-    badge.style.display = 'inline-block';
-    badge.textContent = `✅ ${file.name} (${formatBytes(file.size)})`;
-}
-
-function updateProgressUI(stage, pct, detail, eta) {
-    document.getElementById('progressPanel').style.display = 'block';
-    document.getElementById('stageText').textContent = stage;
-    const clamped = Math.max(0, Math.min(100, Math.round(pct)));
-    document.getElementById('pctText').textContent = clamped + '%';
-    document.getElementById('barFill').style.width = clamped + '%';
-    if (detail) document.getElementById('detailMeta').textContent = detail;
-    if (eta) document.getElementById('etaMeta').textContent = eta;
-}
-
-function startProcess() {
-    if (!selectedFile) {
-        alert('ကျေးဇူးပြု၍ ဗီဒီယိုဖိုင် အရင်ရွေးချယ်ပါ!');
-        return;
-    }
-
-    const mode = document.getElementById('encodeMode').value;
-    const startBtn = document.getElementById('startBtn');
-    startBtn.disabled = true;
-    document.getElementById('resultBanner').style.display = 'none';
-    document.getElementById('detailsSection').style.display = 'none';
-
-    const formData = new FormData();
-    formData.append('video', selectedFile);
-    formData.append('mode', mode);
-
-    const xhr = new XMLHttpRequest();
-    const uploadStart = Date.now();
-
-    xhr.upload.addEventListener('progress', (e) => {
-        if (e.lengthComputable) {
-            const pct = (e.loaded / e.total) * 100;
-            const elapsed = (Date.now() - uploadStart) / 1000;
-            const speed = elapsed > 0 ? (e.loaded / elapsed) : 0;
-            const remaining = speed > 0 ? ((e.total - e.loaded) / speed) : 0;
-            updateProgressUI(
-                '📤 Step 1/3: Uploading Video to Server...',
-                pct,
-                `Uploaded ${formatBytes(e.loaded)} / ${formatBytes(e.total)} (${formatBytes(speed)}/s)`,
-                `Upload ETA: ${formatTime(remaining)}`
-            );
-        }
-    });
-
-    xhr.onload = function () {
-        if (xhr.status === 200) {
-            const resp = JSON.parse(xhr.responseText);
-            currentJobId = resp.job_id;
-            pollJobStatus(currentJobId);
-        } else {
-            startBtn.disabled = false;
-            updateProgressUI('❌ Upload Error', 0, xhr.responseText || 'Server error', '');
-        }
-    };
-
-    xhr.onerror = function () {
-        startBtn.disabled = false;
-        updateProgressUI('❌ Network Error', 0, 'Failed to connect to server', '');
-    };
-
-    updateProgressUI('📤 Step 1/3: Starting Upload...', 0, 'Connecting...', 'ETA: Calculating...');
-    xhr.open('POST', '/api/start_job', true);
-    xhr.send(formData);
-}
-
-function pollJobStatus(jobId) {
-    if (pollTimer) clearInterval(pollTimer);
-    pollTimer = setInterval(async () => {
-        try {
-            const res = await fetch(`/api/job_status/${jobId}?t=${Date.now()}`);
-            if (!res.ok) return;
-            const data = await res.json();
-
-            if (data.status === 'processing') {
-                updateProgressUI(
-                    `⚙️ Step 2/3: ${data.stage || 'Encoding HEVC 1080p60...'}`,
-                    data.progress || 0,
-                    data.detail || 'Applying Quality_3_fixed_exact_q2_style formula...',
-                    `Encode ETA: ${data.eta || 'Calculating...'}`
-                );
-            } else if (data.status === 'done') {
-                clearInterval(pollTimer);
-                updateProgressUI(
-                    '✅ Step 2/3 Complete: Video Rebuilt to Exact Quality_3_fixed_exact_q2_style!',
-                    100,
-                    `${data.message} • Output Size: ${formatBytes(data.output_size)}`,
-                    'ETA: 0s (Ready)'
-                );
-                currentDownloadFilename = data.download_name || 'Quality_3_fixed_exact_q2_style.mp4';
-
-                // Populate inspection reports
-                document.getElementById('inSummaryPre').textContent = data.in_summary || '';
-                document.getElementById('inBoxPre').textContent = data.in_box_tree || '';
-                document.getElementById('inProbePre').textContent = data.in_probe || '';
-
-                document.getElementById('outSummaryPre').textContent = data.out_summary || '';
-                document.getElementById('outBoxPre').textContent = data.out_box_tree || '';
-                document.getElementById('outProbePre').textContent = data.out_probe || '';
-
-                document.getElementById('resultTitle').textContent = `✅ ${data.message} (${formatBytes(data.output_size)})`;
-                document.getElementById('resultBanner').style.display = 'block';
-                document.getElementById('startBtn').disabled = false;
-
-                // Automatically trigger download with live % progress bar!
-                downloadOutputWithProgress();
-            } else if (data.status === 'error') {
-                clearInterval(pollTimer);
-                updateProgressUI('❌ Encoding Error', 0, data.error || 'Unknown error', '');
-                document.getElementById('startBtn').disabled = false;
-            }
-        } catch (e) {}
-    }, 600);
-}
-
-function downloadOutputWithProgress() {
-    if (!currentJobId) return;
-    const dlBtn = document.getElementById('downloadBtn');
-    dlBtn.disabled = true;
-
-    const xhr = new XMLHttpRequest();
-    const dlStart = Date.now();
-    xhr.open('GET', `/api/download_job/${currentJobId}`, true);
-    xhr.responseType = 'blob';
-
-    xhr.onprogress = function (e) {
-        if (e.lengthComputable && e.total > 0) {
-            const pct = (e.loaded / e.total) * 100;
-            const elapsed = (Date.now() - dlStart) / 1000;
-            const speed = elapsed > 0 ? (e.loaded / elapsed) : 0;
-            const remaining = speed > 0 ? ((e.total - e.loaded) / speed) : 0;
-            updateProgressUI(
-                '⬇️ Step 3/3: Downloading Video to Your Device...',
-                pct,
-                `Downloaded ${formatBytes(e.loaded)} / ${formatBytes(e.total)} (${formatBytes(speed)}/s)`,
-                `Download ETA: ${formatTime(remaining)}`
-            );
-        }
-    };
-
-    xhr.onload = function () {
-        dlBtn.disabled = false;
-        if (xhr.status === 200) {
-            updateProgressUI(
-                '🎉 All Steps Complete! Video Saved to Your Device!',
-                100,
-                `File: ${currentDownloadFilename} (${formatBytes(xhr.response.size)})`,
-                'Completed in ' + formatTime((Date.now() - dlStart) / 1000)
-            );
-            const blobUrl = window.URL.createObjectURL(xhr.response);
-            const a = document.createElement('a');
-            a.style.display = 'none';
-            a.href = blobUrl;
-            a.download = currentDownloadFilename;
-            document.body.appendChild(a);
-            a.click();
-            setTimeout(() => {
-                window.URL.revokeObjectURL(blobUrl);
-                a.remove();
-            }, 2000);
-        } else {
-            updateProgressUI('❌ Download Failed', 0, 'Could not download output file', '');
-        }
-    };
-
-    xhr.onerror = function () {
-        dlBtn.disabled = false;
-        updateProgressUI('❌ Download Network Error', 0, 'Connection interrupted', '');
-    };
-
-    updateProgressUI('⬇️ Step 3/3: Starting Video Download...', 0, 'Requesting file stream...', 'Download ETA: Calculating...');
-    xhr.send();
-}
-
-function toggleDetails() {
-    const el = document.getElementById('detailsSection');
-    el.style.display = (el.style.display === 'none' || !el.style.display) ? 'block' : 'none';
-}
-</script>
+    <div class="card">
+        <h3>၂။ Standalone Deep X-Ray Inspector (Encode မလုပ်ဘဲ ဗီဒီယိုဖိုင်၏ အချက်အလက်အကုန် စစ်ဆေးရန်)</h3>
+        <form action="/deep_xray" method="post" enctype="multipart/form-data">
+            <input type="file" name="video" accept="video/mp4,video/*" required><br><br>
+            <button type="submit" style="background: #ff9100;">🔍 Inspect All Video Details</button>
+        </form>
+    </div>
 </body>
 </html>
 """
@@ -863,240 +364,155 @@ def generate_full_video_report(filepath):
     }
     return summary, box_tree_str, json.dumps(probe_json, indent=2)
 
-
-
-def run_encode_job_background(job_id, in_path, out_path, mode, orig_filename):
-    try:
-        JOBS[job_id]["stage"] = "Inspecting Input Video..."
-        JOBS[job_id]["progress"] = 5
-        in_summary, in_box_tree, in_probe_pretty = generate_full_video_report(in_path)
-        in_probe_data = json.loads(in_probe_pretty)
-        in_streams = in_probe_data.get("streams", [])
-        in_v = next((s for s in in_streams if s.get("codec_type") == "video"), {})
-        in_w = int(in_v.get("width") or 1080)
-        in_h = int(in_v.get("height") or 1920)
-        is_landscape = in_w > in_h
-        target_w, target_h = (1920, 1080) if is_landscape else (1080, 1920)
-
-        fmt = in_probe_data.get("format", {})
-        total_dur = float(fmt.get("duration") or in_v.get("duration") or 0.0)
-
-        if mode == "header_only":
-            JOBS[job_id]["stage"] = "Copying Bitstream for Instant Header Rebuild..."
-            JOBS[job_id]["progress"] = 60
-            JOBS[job_id]["eta"] = "1s"
-            shutil.copyfile(in_path, out_path)
-        else:
-            JOBS[job_id]["stage"] = f"Encoding {in_w}x{in_h} ➔ {target_w}x{target_h} HEVC 60FPS..."
-            JOBS[job_id]["progress"] = 10
-
-            vf_chain = (
-                f"scale={target_w}:{target_h}:flags=lanczos+accurate_rnd+full_chroma_int,"
-                "setsar=1/1,"
-                "fps=60,"
-                "format=yuvj420p"
-            )
-
-            x265_params = (
-                "frame-threads=2:numa-pools=2:level-idc=41:high-tier=1:ref=1:no-repeat-headers=1:no-open-gop=1:"
-                "min-keyint=60:keyint=120:bframes=2:b-adapt=0:b-pyramid=1:"
-                "rc-lookahead=5:lookahead-slices=8:scenecut=40:"
-                "ctu=64:min-cu-size=8:no-rect=1:no-amp=1:max-tu-size=32:"
-                "tu-inter-depth=1:tu-intra-depth=1:signhide=1:strong-intra-smoothing=1:"
-                "max-merge=2:limit-refs=3:me=1:subme=2:merange=57:weightp=1:no-weightb=1:"
-                "deblock=0,0:sao=1:selective-sao=4:early-skip=1:rskip=1:fast-intra=1:"
-                "psy-rd=2.00:vbv-maxrate=24000:vbv-bufsize=48000:vbv-init=0.9:"
-                "aq-mode=2:aq-strength=1.00:cutree=1:qg-size=32:sar=1:"
-                "range=full:colorprim=bt709:transfer=bt709:colormatrix=bt709:chromaloc=1:info=1"
-            )
-
-            cmd = [
-                "ffmpeg", "-y",
-                "-threads", "2",
-                "-i", in_path,
-                "-map", "0:v:0",
-                "-map", "0:a:0?",
-                "-vf", vf_chain,
-                "-fps_mode", "cfr",
-                "-r", "60",
-                "-video_track_timescale", "15360",
-                "-c:v", "libx265",
-                "-tag:v", "hvc1",
-                "-preset", "superfast",
-                "-profile:v", "main",
-                "-b:v", "22300k",
-                "-x265-params", x265_params,
-                "-pix_fmt", "yuvj420p",
-                "-color_range", "pc",
-                "-field_order", "progressive",
-                "-brand", "isom",
-                "-c:a", "aac",
-                "-b:a", "130k",
-                "-ar", "48000",
-                "-ac", "2",
-                "-movflags", "+faststart",
-                "-progress", "pipe:1",
-                "-nostats",
-                out_path
-            ]
-
-            start_t = time.time()
-            proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1
-            )
-
-            tail_lines = []
-            for line in proc.stdout:
-                tail_lines.append(line)
-                if len(tail_lines) > 40:
-                    tail_lines.pop(0)
-                if line.startswith("out_time_ms=") or line.startswith("out_time_us="):
-                    try:
-                        val_us = int(line.split("=", 1)[1].strip())
-                        cur_sec = val_us / 1_000_000.0
-                        if total_dur > 0 and cur_sec >= 0:
-                            ratio = min(0.99, cur_sec / total_dur)
-                            pct = int(10 + ratio * 82)
-                            elapsed = time.time() - start_t
-                            if ratio > 0.02:
-                                eta_sec = max(0, int((elapsed / ratio) - elapsed))
-                                eta_str = f"{eta_sec // 60}m {eta_sec % 60}s" if eta_sec >= 60 else f"{eta_sec}s"
-                            else:
-                                eta_str = "Calculating..."
-                            JOBS[job_id]["progress"] = pct
-                            JOBS[job_id]["detail"] = f"Encoded {cur_sec:.1f}s / {total_dur:.1f}s (HEVC 22.3 Mbps)"
-                            JOBS[job_id]["eta"] = eta_str
-                    except Exception:
-                        pass
-
-            proc.wait()
-            if proc.returncode != 0:
-                JOBS[job_id]["status"] = "error"
-                JOBS[job_id]["error"] = "FFmpeg failed: " + "".join(tail_lines[-15:])
-                return
-
-        JOBS[job_id]["stage"] = "Rebuilding MP4 Boxes to Exact Quality_3_fixed_exact_q2_style..."
-        JOBS[job_id]["progress"] = 95
-        JOBS[job_id]["eta"] = "1s"
-
-        msg = apply_exact_quality3_fixed_structure(out_path, target_w=target_w, target_h=target_h)
-
-        # Also patch stsd (+28/+30) coded_width/height in-place if user wants direct upload without extension,
-        # OR keep exact Quality_3_fixed_exact_q2_style structure:
-        out_summary, out_box_tree, out_probe_pretty = generate_full_video_report(out_path)
-        out_size = os.path.getsize(out_path) if os.path.exists(out_path) else 0
-
-        base_name = os.path.splitext(orig_filename or "video")[0]
-        dl_name = f"{base_name}_Quality3_HQ.mp4"
-
-        JOBS[job_id].update({
-            "status": "done",
-            "progress": 100,
-            "stage": "Completed!",
-            "eta": "0s",
-            "message": msg,
-            "output_size": out_size,
-            "download_name": dl_name,
-            "in_summary": json.dumps(in_summary, indent=2),
-            "in_box_tree": in_box_tree,
-            "in_probe": in_probe_pretty,
-            "out_summary": json.dumps(out_summary, indent=2),
-            "out_box_tree": out_box_tree,
-            "out_probe": out_probe_pretty
-        })
-    except Exception as e:
-        JOBS[job_id]["status"] = "error"
-        JOBS[job_id]["error"] = str(e)
-
-
 @app.route("/", methods=["GET"])
 def index():
     return render_template_string(HTML_TEMPLATE)
-
-
-@app.route("/api/start_job", methods=["POST"])
-def api_start_job():
-    if "video" not in request.files:
-        return jsonify({"error": "No video file provided"}), 400
-
-    video_file = request.files["video"]
-    mode = request.form.get("mode", "full_encode")
-    job_id = uuid.uuid4().hex[:12]
-
-    in_path = os.path.join(JOBS_DIR, f"in_{job_id}.mp4")
-    out_path = os.path.join(JOBS_DIR, f"out_{job_id}.mp4")
-    video_file.save(in_path)
-
-    JOBS[job_id] = {
-        "status": "processing",
-        "progress": 2,
-        "stage": "Starting Video Pipeline...",
-        "detail": f"File: {video_file.filename}",
-        "eta": "Calculating...",
-        "in_path": in_path,
-        "out_path": out_path,
-        "download_name": "Quality_3_fixed_exact_q2_style.mp4"
-    }
-
-    t = threading.Thread(
-        target=run_encode_job_background,
-        args=(job_id, in_path, out_path, mode, video_file.filename),
-        daemon=True
-    )
-    t.start()
-
-    return jsonify({"ok": True, "job_id": job_id})
-
-
-@app.route("/api/job_status/<job_id>", methods=["GET"])
-def api_job_status(job_id):
-    job = JOBS.get(job_id)
-    if not job:
-        return jsonify({"error": "Job not found"}), 404
-    return jsonify(job)
-
-
-@app.route("/api/download_job/<job_id>", methods=["GET"])
-def api_download_job(job_id):
-    job = JOBS.get(job_id)
-    if not job or not os.path.exists(job["out_path"]):
-        return "File not found", 404
-    return send_file(
-        job["out_path"],
-        mimetype="video/mp4",
-        as_attachment=True,
-        download_name=job.get("download_name", "Quality_3_fixed_exact_q2_style.mp4")
-    )
-
 
 @app.route("/deep_xray", methods=["POST"])
 def deep_xray():
     if "video" not in request.files:
         return "No video file", 400
     f = request.files["video"]
-    ref_path = os.path.join(JOBS_DIR, "xray_in.mp4")
+    ref_path = "xray_in.mp4"
     f.save(ref_path)
     summary, box_tree, probe_pretty = generate_full_video_report(ref_path)
     summary_pretty = json.dumps(summary, indent=2)
     return f"""
-    <body style="background:#0b0d12; color:#fff; font-family:Arial; padding:25px;">
+    <body style="background:#121212; color:#fff; font-family:Arial; padding:25px;">
         <h2>🔬 Complete Video Inspection Report ({f.filename})</h2>
-        <a href="/" style="color:#00e676; font-size:16px;">⬅ Back to HQ Video Studio</a>
+        <a href="/" style="color:#00e676; font-size:16px;">⬅ Back to Encoder Lab</a>
         <h3>1. Key Video & Audio Summary:</h3>
-        <pre style="background:#07090e; color:#00e676; padding:15px; border-radius:8px;">{summary_pretty}</pre>
+        <pre>{summary_pretty}</pre>
         <h3>2. MP4 Box & Header Hierarchy (tkhd, mvhd, stsd, hvcC, fiel, pasp, btrt, udta, free):</h3>
-        <pre style="background:#07090e; color:#00e676; padding:15px; border-radius:8px;">{box_tree}</pre>
+        <pre>{box_tree}</pre>
         <h3>3. Complete FFprobe Streams & Format JSON:</h3>
-        <pre style="background:#07090e; color:#00e676; padding:15px; border-radius:8px;">{probe_pretty}</pre>
+        <pre>{probe_pretty}</pre>
         <a href="/" style="color:#00e676; font-size:18px;">⬅ Back</a>
     </body>
     """
 
+@app.route("/transcode", methods=["POST"])
+def transcode():
+    if "video" not in request.files:
+        return "No video file provided", 400
+
+    video_file = request.files["video"]
+    mode = request.form.get("mode", "full_encode")
+    in_path = "test_in.mp4"
+    out_path = "test_out.mp4"
+    video_file.save(in_path)
+
+    # 1. Inspect ALL details of the uploaded input video first!
+    in_summary, in_box_tree, in_probe_pretty = generate_full_video_report(in_path)
+    in_summary_pretty = json.dumps(in_summary, indent=2)
+
+    in_probe_data = json.loads(in_probe_pretty)
+    in_streams = in_probe_data.get("streams", [])
+    in_v = next((s for s in in_streams if s.get("codec_type") == "video"), {})
+    in_w = int(in_v.get("width") or 1080)
+    in_h = int(in_v.get("height") or 1920)
+    is_landscape = in_w > in_h
+    target_w, target_h = (1920, 1080) if is_landscape else (1080, 1920)
+
+    if mode == "header_only":
+        import shutil
+        shutil.copyfile(in_path, out_path)
+    else:
+        vf_chain = (
+            f"scale={target_w}:{target_h}:flags=lanczos+accurate_rnd+full_chroma_int,"
+            "setsar=1/1,"
+            "fps=60,"
+            "format=yuvj420p"
+        )
+
+        x265_params = (
+            "frame-threads=2:numa-pools=2:level-idc=41:high-tier=1:ref=1:no-repeat-headers=1:no-open-gop=1:"
+            "min-keyint=60:keyint=120:bframes=2:b-adapt=0:b-pyramid=1:"
+            "rc-lookahead=5:lookahead-slices=8:scenecut=40:"
+            "ctu=64:min-cu-size=8:no-rect=1:no-amp=1:max-tu-size=32:"
+            "tu-inter-depth=1:tu-intra-depth=1:signhide=1:strong-intra-smoothing=1:"
+            "max-merge=2:limit-refs=3:me=1:subme=2:merange=57:weightp=1:no-weightb=1:"
+            "deblock=0,0:sao=1:selective-sao=4:early-skip=1:rskip=1:fast-intra=1:"
+            "psy-rd=2.00:vbv-maxrate=24000:vbv-bufsize=48000:vbv-init=0.9:"
+            "aq-mode=2:aq-strength=1.00:cutree=1:qg-size=32:sar=1:"
+            "range=full:colorprim=bt709:transfer=bt709:colormatrix=bt709:chromaloc=1:info=1"
+        )
+
+        cmd = [
+            "ffmpeg", "-y",
+            "-threads", "2",
+            "-i", in_path,
+            "-map", "0:v:0",
+            "-map", "0:a:0?",
+            "-vf", vf_chain,
+            "-fps_mode", "cfr",
+            "-r", "60",
+            "-video_track_timescale", "15360",
+            "-c:v", "libx265",
+            "-tag:v", "hvc1",
+            "-preset", "superfast",
+            "-profile:v", "main",
+            "-b:v", "22300k",
+            "-x265-params", x265_params,
+            "-pix_fmt", "yuvj420p",
+            "-color_range", "pc",
+            "-field_order", "progressive",
+            "-brand", "isom",
+            "-c:a", "aac",
+            "-b:a", "130k",
+            "-ar", "48000",
+            "-ac", "2",
+            "-movflags", "+faststart",
+            out_path
+        ]
+
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if res.returncode != 0:
+            return f"<pre>FFmpeg failed:\n{res.stderr[-2000:]}</pre>", 500
+
+    # 2. Rebuild MP4 into 100% Bit-Exact Quality_3_fixed_exact_q2_style.mp4 structure!
+    msg = apply_exact_quality3_fixed_structure(out_path, target_w=target_w, target_h=target_h)
+
+    # 3. Inspect ALL details of the rebuilt output video!
+    out_summary, out_box_tree, out_probe_pretty = generate_full_video_report(out_path)
+    out_summary_pretty = json.dumps(out_summary, indent=2)
+
+    return f"""
+    <body style="background:#121212; color:#fff; font-family:Arial; padding:25px;">
+        <h2>✅ {msg}</h2>
+        <a href="/download" style="font-size: 18px; background: #00e676; color: #000; font-weight: bold; padding: 14px 28px; text-decoration: none; border-radius: 6px; display: inline-block;">⬇️ Download Quality_3_fixed_exact_q2_style.mp4</a>
+        &nbsp;&nbsp;
+        <a href="/" style="color: #29b6f6; font-size: 16px;">⬅ Back to Lab</a>
+        <hr style="border-color:#333; margin:25px 0;">
+
+        <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+            <div>
+                <h3 style="color:#ff9100;">📥 Uploaded Input Video Details ({video_file.filename})</h3>
+                <h4>Input Summary:</h4>
+                <pre>{in_summary_pretty}</pre>
+                <h4>Input MP4 Box Structure:</h4>
+                <pre>{in_box_tree}</pre>
+                <h4>Input FFprobe Full JSON:</h4>
+                <pre>{in_probe_pretty}</pre>
+            </div>
+            <div>
+                <h3 style="color:#00e676;">📤 Output Video Details (Quality_3_fixed_exact_q2_style.mp4)</h3>
+                <h4>Output Summary:</h4>
+                <pre>{out_summary_pretty}</pre>
+                <h4>Output MP4 Box Structure (100% Exact Match):</h4>
+                <pre>{out_box_tree}</pre>
+                <h4>Output FFprobe Full JSON:</h4>
+                <pre>{out_probe_pretty}</pre>
+            </div>
+        </div>
+    </body>
+    """
+
+@app.route("/download", methods=["GET"])
+def download():
+    if os.path.exists("test_out.mp4"):
+        return send_file("test_out.mp4", as_attachment=True, download_name="Quality_3_fixed_exact_q2_style.mp4")
+    return "File not found", 404
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=5000)
