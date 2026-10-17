@@ -238,8 +238,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
         <div class="controls-grid">
             <select id="encodeMode">
-                <option value="xuqing_1000x2166_h264">🔥 Mode 1: 1000x2166 Custom 2K Portrait • H.264 (43.5 Mbps, High/L5.2) + METODE: xuqingxinnocent</option>
-                <option value="header_only">⚡ Mode 2: Instant 1-Sec Header & METODE Rebuild Only (Encode လုပ်ပြီးသား ဖိုင်များအတွက်)</option>
+                <option value="xuqing_1000x2166_h264">🔥 Mode 1: 1000x2166 (Custom 2K) • H.264 (43.5 Mbps, High/L5.2) + METODE: xuqingxinnocent</option>
+                <option value="xuqing_1080x1920_h264">✨ Mode 2: 1080x1920 (Full HD) • H.264 (43.5 Mbps, High/L5.2) + METODE: xuqingxinnocent</option>
+                <option value="xuqing_1080x1920_hevc">💎 Mode 3: 1080x1920 (Full HD) • HEVC / hvc1 (22.3 Mbps, Main/L4.1) + METODE: xuqingxinnocent</option>
+                <option value="header_only">⚡ Mode 4: Instant 1-Sec Header & METODE Rebuild Only (Encode လုပ်ပြီးသား ဖိုင်များအတွက်)</option>
             </select>
             <input type="text" id="customMethod" value="xuqingxinnocent" placeholder="METODE နာမည် (Default: xuqingxinnocent)">
             <button class="btn" id="startBtn" onclick="startProcess()">🚀 Start Encode & Extract Video</button>
@@ -530,7 +532,7 @@ EXACT_AVC1_FTYP_32B = bytes.fromhex("000000206674797069736f6d0000020069736f6d697
 EXACT_MVHD_120B = bytes.fromhex("000000786d7668640100000000000000000000000000000000000000000003e8ffffffffffffffff0001000001000000000000000000000000010000000000000000000000000000000100000000000000000000000000004000000000000000000000000000000000000000000000000000000000000003")
 EXACT_COLR_19B = bytes.fromhex("00000013636f6c726e636c7800010001000100")
 EXACT_PASP_16B = bytes.fromhex("00000010706173700000000100000001")
-EXACT_BTRT_20B = bytes.fromhex("00000014627472740000000002983a2202983a22")
+EXACT_BTRT_20B = bytes.fromhex("00000014627472740000000001312d0001312d00")
 
 def build_apple_ilst_udta(method_name="xuqingxinnocent"):
     clean_name = (method_name or "xuqingxinnocent").strip()
@@ -848,7 +850,14 @@ def run_encode_job_background(job_id, in_path, out_path, mode, method_name, orig
         in_w = int(in_v.get("width") or 1080)
         in_h = int(in_v.get("height") or 1920)
         is_landscape = in_w > in_h
-        target_w, target_h = (2166, 1000) if is_landscape else (1000, 2166)
+
+        if mode in ("xuqing_1080x1920_h264", "xuqing_1080x1920_hevc"):
+            target_w, target_h = (1920, 1080) if is_landscape else (1080, 1920)
+        elif mode == "header_only":
+            target_w, target_h = (in_w, in_h)
+        else:
+            # Default Mode 1: 1000x2166 Custom 2K Portrait
+            target_w, target_h = (2166, 1000) if is_landscape else (1000, 2166)
 
         fmt = in_probe_data.get("format", {})
         total_dur = float(fmt.get("duration") or in_v.get("duration") or 0.0)
@@ -860,7 +869,88 @@ def run_encode_job_background(job_id, in_path, out_path, mode, method_name, orig
             JOBS[job_id]["progress"] = 60
             JOBS[job_id]["eta"] = "1s"
             shutil.copyfile(in_path, out_path)
+        elif mode == "xuqing_1080x1920_hevc":
+            JOBS[job_id]["stage"] = f"Encoding {in_w}x{in_h} ➔ {target_w}x{target_h} HEVC (22.3 Mbps, Main@L4.1)..."
+            JOBS[job_id]["progress"] = 10
+
+            vf_chain = (
+                f"scale={target_w}:{target_h}:flags=lanczos+accurate_rnd+full_chroma_int,"
+                "setsar=1/1,"
+                "fps=60,"
+                "format=yuvj420p"
+            )
+            x265_params = (
+                "frame-threads=2:numa-pools=2:level-idc=41:high-tier=1:ref=1:no-repeat-headers=1:no-open-gop=1:"
+                "min-keyint=60:keyint=120:bframes=2:b-adapt=0:b-pyramid=1:"
+                "rc-lookahead=5:lookahead-slices=8:scenecut=40:"
+                "ctu=64:min-cu-size=8:no-rect=1:no-amp=1:max-tu-size=32:"
+                "tu-inter-depth=1:tu-intra-depth=1:signhide=1:strong-intra-smoothing=1:"
+                "max-merge=2:limit-refs=3:me=1:subme=2:merange=57:weightp=1:no-weightb=1:"
+                "deblock=0,0:sao=1:selective-sao=4:early-skip=1:rskip=1:fast-intra=1:"
+                "psy-rd=2.00:vbv-maxrate=24000:vbv-bufsize=48000:vbv-init=0.9:"
+                "aq-mode=2:aq-strength=1.00:cutree=1:qg-size=32:sar=1:"
+                "range=full:colorprim=bt709:transfer=bt709:colormatrix=bt709:chromaloc=1:info=1"
+            )
+            cmd = [
+                "ffmpeg", "-y",
+                "-threads", "2",
+                "-i", in_path,
+                "-map", "0:v:0",
+                "-map", "0:a:0?",
+                "-vf", vf_chain,
+                "-fps_mode", "cfr",
+                "-r", "60",
+                "-video_track_timescale", "15360",
+                "-c:v", "libx265",
+                "-tag:v", "hvc1",
+                "-preset", "superfast",
+                "-profile:v", "main",
+                "-b:v", "22300k",
+                "-x265-params", x265_params,
+                "-pix_fmt", "yuvj420p",
+                "-color_range", "pc",
+                "-field_order", "progressive",
+                "-brand", "isom",
+                "-metadata:s:v:0", f"encoder={ver_method}",
+                "-c:a", "aac",
+                "-b:a", "320k",
+                "-ar", "48000",
+                "-ac", "2",
+                "-movflags", "+faststart",
+                "-progress", "pipe:1",
+                "-nostats",
+                out_path
+            ]
+
+            start_t = time.time()
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+            tail_lines = []
+            for line in proc.stdout:
+                tail_lines.append(line)
+                if len(tail_lines) > 40:
+                    tail_lines.pop(0)
+                if line.startswith("out_time_ms=") or line.startswith("out_time_us="):
+                    try:
+                        val_us = int(line.split("=", 1)[1].strip())
+                        cur_sec = val_us / 1_000_000.0
+                        if total_dur > 0 and cur_sec >= 0:
+                            ratio = min(0.99, cur_sec / total_dur)
+                            pct = int(10 + ratio * 82)
+                            elapsed = time.time() - start_t
+                            eta_sec = max(0, int((elapsed / ratio) - elapsed)) if ratio > 0.02 else 0
+                            eta_str = (f"{eta_sec // 60}m {eta_sec % 60}s" if eta_sec >= 60 else f"{eta_sec}s") if ratio > 0.02 else "Calculating..."
+                            JOBS[job_id]["progress"] = pct
+                            JOBS[job_id]["detail"] = f"Encoded {cur_sec:.1f}s / {total_dur:.1f}s ({target_w}x{target_h} HEVC 22.3 Mbps)"
+                            JOBS[job_id]["eta"] = eta_str
+                    except Exception:
+                        pass
+            proc.wait()
+            if proc.returncode != 0:
+                JOBS[job_id]["status"] = "error"
+                JOBS[job_id]["error"] = "FFmpeg failed: " + "".join(tail_lines[-15:])
+                return
         else:
+            # H.264 43.5 Mbps High@L5.2 (supports both 1000x2166 and 1080x1920)
             JOBS[job_id]["stage"] = f"Encoding {in_w}x{in_h} ➔ {target_w}x{target_h} H.264 (43.5 Mbps, High@L5.2)..."
             JOBS[job_id]["progress"] = 10
 
@@ -891,9 +981,9 @@ def run_encode_job_background(job_id, in_path, out_path, mode, method_name, orig
                 "-preset", "superfast",
                 "-profile:v", "high",
                 "-level:v", "5.2",
-                "-b:v", "43530k",
-                "-maxrate", "46000k",
-                "-bufsize", "87060k",
+                "-b:v", "20000k",
+                "-maxrate", "22000k",
+                "-bufsize", "40000k",
                 "-x264-params", x264_params,
                 "-pix_fmt", "yuv420p",
                 "-color_range", "tv",
@@ -941,7 +1031,7 @@ def run_encode_job_background(job_id, in_path, out_path, mode, method_name, orig
                             else:
                                 eta_str = "Calculating..."
                             JOBS[job_id]["progress"] = pct
-                            JOBS[job_id]["detail"] = f"Encoded {cur_sec:.1f}s / {total_dur:.1f}s (1000x2166 H.264 43.5 Mbps)"
+                            JOBS[job_id]["detail"] = f"Encoded {cur_sec:.1f}s / {total_dur:.1f}s ({target_w}x{target_h} H.264 43.5 Mbps)"
                             JOBS[job_id]["eta"] = eta_str
                     except Exception:
                         pass
@@ -952,7 +1042,7 @@ def run_encode_job_background(job_id, in_path, out_path, mode, method_name, orig
                 JOBS[job_id]["error"] = "FFmpeg failed: " + "".join(tail_lines[-15:])
                 return
 
-        JOBS[job_id]["stage"] = f"Injecting METODE: {clean_method} & 1000x2166 Box Hierarchy..."
+        JOBS[job_id]["stage"] = f"Injecting METODE: {clean_method} & {target_w}x{target_h} Box Hierarchy..."
         JOBS[job_id]["progress"] = 95
         JOBS[job_id]["eta"] = "1s"
 
@@ -968,7 +1058,7 @@ def run_encode_job_background(job_id, in_path, out_path, mode, method_name, orig
         out_size = os.path.getsize(out_path) if os.path.exists(out_path) else 0
 
         base_name = os.path.splitext(orig_filename or "video")[0]
-        dl_name = f"{base_name}_{clean_method}_1000x2166.mp4"
+        dl_name = f"{base_name}_{clean_method}_{target_w}x{target_h}.mp4"
 
         JOBS[job_id].update({
             "status": "done",
