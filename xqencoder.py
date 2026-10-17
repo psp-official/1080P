@@ -905,7 +905,7 @@ def run_encode_job_background(job_id, in_path, out_path, mode, method_name, orig
                 "-tag:v", "hvc1",
                 "-preset", "superfast",
                 "-profile:v", "main",
-                "-b:v", "12000k",
+                "-b:v", "22300k",
                 "-x265-params", x265_params,
                 "-pix_fmt", "yuvj420p",
                 "-color_range", "pc",
