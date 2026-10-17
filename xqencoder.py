@@ -238,10 +238,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
         <div class="controls-grid">
             <select id="encodeMode">
-                <option value="xuqing_1000x2166_h264">🔥 Mode 1: 1000x2166 (Custom 2K) • H.264 (43.5 Mbps, High/L5.2) + METODE: xuqingxinnocent</option>
-                <option value="xuqing_1080x1920_h264">✨ Mode 2: 1080x1920 (Full HD) • H.264 (43.5 Mbps, High/L5.2) + METODE: xuqingxinnocent</option>
-                <option value="xuqing_1080x1920_hevc">💎 Mode 3: 1080x1920 (Full HD) • HEVC / hvc1 (22.3 Mbps, Main/L4.1) + METODE: xuqingxinnocent</option>
-                <option value="header_only">⚡ Mode 4: Instant 1-Sec Header & METODE Rebuild Only (Encode လုပ်ပြီးသား ဖိုင်များအတွက်)</option>
+                <option value="instant_1000x2166">⚡ Instant 1-Sec Bypass (မူရင်း Quality/Bitrate အတိုင်း + 1000x2166 Header + xuqingxinnocent)</option>
+                <option value="instant_1080x1920">⚡ Instant 1-Sec Bypass (မူရင်း Quality/Bitrate အတိုင်း + 1080x1920 Header + xuqingxinnocent)</option>
+                <option value="header_only">⚡ Instant 1-Sec Bypass (မူရင်း Resolution & မူရင်း Quality အတိုင်း + xuqingxinnocent)</option>
+                <option value="xuqing_1000x2166_h264">🔥 Re-Encode: 1000x2166 • H.264</option>
+                <option value="xuqing_1080x1920_h264">✨ Re-Encode: 1080x1920 • H.264</option>
+                <option value="xuqing_1080x1920_hevc">💎 Re-Encode: 1080x1920 • HEVC</option>
             </select>
             <input type="text" id="customMethod" value="xuqingxinnocent" placeholder="METODE နာမည် (Default: xuqingxinnocent)">
             <button class="btn" id="startBtn" onclick="startProcess()">🚀 Start Encode & Extract Video</button>
@@ -851,21 +853,23 @@ def run_encode_job_background(job_id, in_path, out_path, mode, method_name, orig
         in_h = int(in_v.get("height") or 1920)
         is_landscape = in_w > in_h
 
-        if mode in ("xuqing_1080x1920_h264", "xuqing_1080x1920_hevc"):
+        if mode == "instant_1000x2166":
+            target_w, target_h = (2166, 1000) if is_landscape else (1000, 2166)
+        elif mode in ("instant_1080x1920", "xuqing_1080x1920_h264", "xuqing_1080x1920_hevc"):
             target_w, target_h = (1920, 1080) if is_landscape else (1080, 1920)
         elif mode == "header_only":
             target_w, target_h = (in_w, in_h)
         else:
-            # Default Mode 1: 1000x2166 Custom 2K Portrait
             target_w, target_h = (2166, 1000) if is_landscape else (1000, 2166)
+
 
         fmt = in_probe_data.get("format", {})
         total_dur = float(fmt.get("duration") or in_v.get("duration") or 0.0)
         clean_method = (method_name or "xuqingxinnocent").strip()
         ver_method = f"{clean_method}-v2.0.0"
 
-        if mode == "header_only":
-            JOBS[job_id]["stage"] = "Copying Bitstream for Instant Header Rebuild..."
+        if mode in ("header_only", "instant_1000x2166", "instant_1080x1920"):
+            JOBS[job_id]["stage"] = "Instant 1-Sec Bypass (Keeping Original Video Bitrate & Quality)..."
             JOBS[job_id]["progress"] = 60
             JOBS[job_id]["eta"] = "1s"
             shutil.copyfile(in_path, out_path)
