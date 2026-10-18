@@ -224,9 +224,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     </div>
 
     <div class="card">
-        <h3>🎬 ၁။ ဗီဒီယို အမြန်ထုတ်ယူရန် (Encode & Download)</h3>
+        <h3>🎬 ၁။ ဗီဒီယို အမြန်ထုတ်ယူရန် (Encode & Download with Live % Progress)</h3>
         <p class="subtext">
-            မည်သည့် ဗီဒီယိုကိုမဆို <b>1000x2166 @ 60FPS H.264 (20 Mbps, High@L5.2, timescale=90000)</b> နှင့် <b>METODE: xuqingxinnocent</b> ဖွဲ့စည်းပုံအတိအကျသို့ ပြောင်းလဲပြီး တိုက်ရိုက် ဒေါင်းလုဒ်ဆွဲယူနိုင်ပါသည်။
+            မည်သည့် ဗီဒီယိုကိုမဆို <b>1000x2166 @ 60FPS H.264 (20 Mbps, High@L5.2, timescale=90000)</b> နှင့် <b>METODE: xuqingxinnocent</b> ဖွဲ့စည်းပုံအတိအကျသို့ ပြောင်းလဲပြီး တိုက်ရိုက် ဒေါင်းလုဒ်ဆွဲယူနိုင်ပါသည်။ Upload %, Encode % (ETA) နှင့် Download % တို့ကို အတန်းလေးဖြင့် တိကျစွာ ပြသပေးပါသည်။
         </p>
 
         <div class="drop-zone" id="dropZone" onclick="document.getElementById('videoInput').click()">
@@ -268,7 +268,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         <div class="result-banner" id="resultBanner">
             <h4 id="resultTitle">✅ ဗီဒီယို ပြောင်းလဲမှု 100% အောင်မြင်ပါသည်!</h4>
             <div class="dl-actions">
-                <button class="btn" id="downloadBtn" onclick="downloadOutputWithProgress()">⬇️ Download Video Now (Direct Browser Download)</button>
+                <button class="btn" id="downloadBtn" onclick="downloadOutputWithProgress()">⬇️ Download Video Now (With % Progress)</button>
                 <button class="btn btn-blue" onclick="toggleDetails()">🔍 View Full Input vs. Output X-Ray Details</button>
             </div>
         </div>
@@ -298,7 +298,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     </div>
 
     <div class="card">
-        <h3>🔬 ၂။ Standalone Deep X-Ray Inspector</h3>
+        <h3>🔬 ၂။ Standalone Deep X-Ray Inspector (Encode မလုပ်ဘဲ ဗီဒီယိုဖိုင် အချက်အလက်အကုန် စစ်ဆေးရန်)</h3>
         <form action="/deep_xray" method="post" enctype="multipart/form-data">
             <input type="file" name="video" accept="video/mp4,video/*" required style="margin-bottom:12px; color:#fff;">
             <button type="submit" class="btn" style="background: linear-gradient(135deg, #ff9100, #ff6d00); color:#000;">🔍 Inspect All Video Details</button>
@@ -469,23 +469,58 @@ function downloadOutputWithProgress() {
     const dlBtn = document.getElementById('downloadBtn');
     dlBtn.disabled = true;
 
-    const downloadUrl = `/api/download_job/${currentJobId}`;
-    
-    const a = document.createElement('a');
-    a.href = downloadUrl;
-    a.download = currentDownloadFilename;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
+    const xhr = new XMLHttpRequest();
+    const dlStart = Date.now();
+    xhr.open('GET', `/api/download_job/${currentJobId}`, true);
+    xhr.responseType = 'blob';
 
-    updateProgressUI(
-        '🎉 All Steps Complete! Download Started!',
-        100,
-        `File: ${currentDownloadFilename} is downloading directly via your browser.`,
-        'Ready'
-    );
-    
-    setTimeout(() => { dlBtn.disabled = false; }, 3000);
+    xhr.onprogress = function (e) {
+        if (e.lengthComputable && e.total > 0) {
+            const pct = (e.loaded / e.total) * 100;
+            const elapsed = (Date.now() - dlStart) / 1000;
+            const speed = elapsed > 0 ? (e.loaded / elapsed) : 0;
+            const remaining = speed > 0 ? ((e.total - e.loaded) / speed) : 0;
+            updateProgressUI(
+                '⬇️ Step 3/3: Downloading Video to Your Device...',
+                pct,
+                `Downloaded ${formatBytes(e.loaded)} / ${formatBytes(e.total)} (${formatBytes(speed)}/s)`,
+                `Download ETA: ${formatTime(remaining)}`
+            );
+        }
+    };
+
+    xhr.onload = function () {
+        dlBtn.disabled = false;
+        if (xhr.status === 200) {
+            updateProgressUI(
+                '🎉 All Steps Complete! Video Saved to Your Device!',
+                100,
+                `File: ${currentDownloadFilename} (${formatBytes(xhr.response.size)})`,
+                'Completed in ' + formatTime((Date.now() - dlStart) / 1000)
+            );
+            const blobUrl = window.URL.createObjectURL(xhr.response);
+            const a = document.createElement('a');
+            a.style.display = 'none';
+            a.href = blobUrl;
+            a.download = currentDownloadFilename;
+            document.body.appendChild(a);
+            a.click();
+            setTimeout(() => {
+                window.URL.revokeObjectURL(blobUrl);
+                a.remove();
+            }, 2000);
+        } else {
+            updateProgressUI('❌ Download Failed', 0, 'Could not download output file', '');
+        }
+    };
+
+    xhr.onerror = function () {
+        dlBtn.disabled = false;
+        updateProgressUI('❌ Download Network Error', 0, 'Connection interrupted', '');
+    };
+
+    updateProgressUI('⬇️ Step 3/3: Starting Video Download...', 0, 'Requesting file stream...', 'Download ETA: Calculating...');
+    xhr.send();
 }
 
 function toggleDetails() {
@@ -827,6 +862,7 @@ def run_encode_job_background(job_id, in_path, out_path, mode, method_name, orig
         elif mode == "header_only":
             target_w, target_h = (in_w, in_h)
         else:
+            # 1000x2166 Custom 2K Portrait
             target_w, target_h = (2166, 1000) if is_landscape else (1000, 2166)
 
         fmt = in_probe_data.get("format", {})
@@ -920,6 +956,7 @@ def run_encode_job_background(job_id, in_path, out_path, mode, method_name, orig
                 JOBS[job_id]["error"] = "FFmpeg failed: " + "".join(tail_lines[-15:])
                 return
         else:
+            # H.264 20 Mbps High@L5.2 (supports both 1000x2166 and 1080x1920)
             JOBS[job_id]["stage"] = f"Encoding {in_w}x{in_h} ➔ {target_w}x{target_h} H.264 (20 Mbps, High@L5.2)..."
             JOBS[job_id]["progress"] = 10
 
