@@ -9,6 +9,7 @@ import threading
 import subprocess
 import json
 import binascii
+from urllib.parse import quote
 from flask import Flask, request, render_template_string, send_file, jsonify, Response
 
 app = Flask(__name__)
@@ -56,6 +57,16 @@ def update_job(job_id, **kwargs):
         return
     job.update(kwargs)
     save_job(job_id, job)
+
+
+def safe_ascii_filename(name, fallback="xuqingxinnocent_HQ.mp4"):
+    clean = re.sub(r'[^A-Za-z0-9._-]+', '_', str(name or ""))
+    clean = clean.strip("._")
+    if not clean:
+        return fallback
+    if not clean.lower().endswith(".mp4"):
+        clean += ".mp4"
+    return clean
 
 
 HTML_TEMPLATE = """<!DOCTYPE html>
@@ -291,7 +302,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 <option value="xuqing_1080x1920_hevc">💎 Mode 8 (Re-Encode): 1080x1920 (Full HD) • HEVC / hvc1 (20 Mbps, Main/L4.1) + METODE: xuqingxinnocent</option>
             </select>
             <input type="text" id="customMethod" value="xuqingxinnocent" placeholder="METODE နာမည် (Default: xuqingxinnocent)">
-            <button class="btn" id="startBtn" onclick="startProcess()">🚀 Start Encode & Extract Video</button>
+            <button class="btn" id="startBtn" type="button" onclick="startProcess()">🚀 Start Encode & Extract Video</button>
         </div>
 
         <div class="progress-panel" id="progressPanel">
@@ -374,7 +385,6 @@ dropZone.addEventListener('drop', (e) => {
     if (e.dataTransfer.files && e.dataTransfer.files[0]) selectFile(e.dataTransfer.files[0]);
 });
 
-// Auto-recover active or finished job if page was refreshed or connection dropped!
 window.addEventListener('DOMContentLoaded', async () => {
     const savedJobId = localStorage.getItem('xuqing_last_job_id');
     if (savedJobId) {
@@ -459,7 +469,11 @@ function uploadSingleChunkWithProgress(jobId, chunkBlob, chunkIndex, totalChunks
 
         xhr.onload = () => {
             if (xhr.status >= 200 && xhr.status < 300) {
-                resolve(JSON.parse(xhr.responseText));
+                try {
+                    resolve(JSON.parse(xhr.responseText));
+                } catch (err) {
+                    resolve({ ok: true });
+                }
             } else {
                 reject(new Error('HTTP ' + xhr.status));
             }
@@ -493,7 +507,6 @@ async function startProcess() {
     let jobId = null;
     let startChunk = 0;
 
-    // Check if we can resume a previous interrupted upload of the exact same file!
     const savedUploadSig = localStorage.getItem('xuqing_upload_sig');
     const savedUploadJob = localStorage.getItem('xuqing_upload_job_id');
     if (savedUploadSig === fileSig && savedUploadJob) {
@@ -510,7 +523,6 @@ async function startProcess() {
     }
 
     if (!jobId) {
-        // Initialize new resumable upload session
         let initOk = false;
         for (let attempt = 1; attempt <= 6; attempt++) {
             try {
@@ -550,7 +562,6 @@ async function startProcess() {
     currentJobId = jobId;
     const uploadStart = Date.now() - (startChunk * CHUNK_SIZE / (2 * 1024 * 1024)) * 1000;
 
-    // Upload chunks sequentially with automatic retry on network drop!
     for (let idx = startChunk; idx < totalChunks; idx++) {
         const startByte = idx * CHUNK_SIZE;
         const endByte = Math.min(totalSize, startByte + CHUNK_SIZE);
@@ -559,7 +570,10 @@ async function startProcess() {
         let chunkSuccess = false;
         for (let retry = 1; retry <= 10; retry++) {
             try {
-                await uploadSingleChunkWithProgress(jobId, chunkBlob, idx, totalChunks, startByte, totalSize, uploadStart);
+                const resChunk = await uploadSingleChunkWithProgress(jobId, chunkBlob, idx, totalChunks, startByte, totalSize, uploadStart);
+                if (resChunk && typeof resChunk.next_chunk === 'number' && resChunk.next_chunk > idx + 1) {
+                    idx = resChunk.next_chunk - 1;
+                }
                 chunkSuccess = true;
                 break;
             } catch (err) {
@@ -586,7 +600,6 @@ async function startProcess() {
         }
     }
 
-    // All chunks uploaded! Clear upload resume token and start encoding job
     localStorage.removeItem('xuqing_upload_sig');
     localStorage.removeItem('xuqing_upload_job_id');
     localStorage.setItem('xuqing_last_job_id', jobId);
@@ -625,14 +638,14 @@ function showCompletedJobUI(jobId, data) {
 
 function pollJobStatus(jobId) {
     if (pollTimer) clearInterval(pollTimer);
-    letconsecutiveErrors = 0;
+    let consecutiveErrors = 0;
 
     pollTimer = setInterval(async () => {
         try {
             const res = await fetch(`/api/job_status/${jobId}?t=${Date.now()}`);
             if (!res.ok) return;
             const data = await res.json();
-            letconsecutiveErrors = 0;
+            consecutiveErrors = 0;
 
             if (data.status === 'processing') {
                 updateProgressUI(
@@ -644,7 +657,6 @@ function pollJobStatus(jobId) {
             } else if (data.status === 'done') {
                 clearInterval(pollTimer);
                 showCompletedJobUI(jobId, data);
-                // Automatically trigger native direct stream download!
                 startNativeDownloadAndTrack(jobId);
             } else if (data.status === 'error') {
                 clearInterval(pollTimer);
@@ -652,9 +664,8 @@ function pollJobStatus(jobId) {
                 document.getElementById('startBtn').disabled = false;
             }
         } catch (e) {
-            letconsecutiveErrors++;
-            if (letconsecutiveErrors > 3) {
-                // Even if internet drops during Step 2 encoding, server continues encoding in background!
+            consecutiveErrors++;
+            if (consecutiveErrors > 3) {
                 document.getElementById('etaMeta').textContent = '⚠️ Reconnecting to server... (Server is still encoding)';
             }
         }
@@ -668,20 +679,15 @@ function triggerNativeStreamDownload(e) {
 }
 
 function startNativeDownloadAndTrack(jobId) {
-    // Use hidden iframe / native browser download instead of XHR Blob!
-    // Native download streams directly to disk (0 MB RAM), never chokes internet speed,
-    // and supports HTTP 206 Range Pause/Resume if connection drops!
     const dlUrl = `/api/download_job/${jobId}?dl_id=${Date.now()}`;
-    let dlFrame = document.getElementById('nativeDlFrame');
-    if (!dlFrame) {
-        dlFrame = document.createElement('iframe');
-        dlFrame.id = 'nativeDlFrame';
-        dlFrame.style.display = 'none';
-        document.body.appendChild(dlFrame);
-    }
-    dlFrame.src = dlUrl;
+    const a = document.createElement('a');
+    a.href = dlUrl;
+    a.download = currentDownloadFilename || 'xuqingxinnocent_HQ.mp4';
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => a.remove(), 2000);
 
-    // Poll lightweight server-side stream progress so the user still sees live Download % & Speed!
     if (dlPollTimer) clearInterval(dlPollTimer);
     const dlStart = Date.now();
     updateProgressUI(
@@ -781,11 +787,6 @@ def build_apple_ilst_udta(method_name="xuqingxinnocent"):
 
 
 def apply_exact_xuqing_1000x2166_structure(filepath, target_w=1000, target_h=2166, method_name="xuqingxinnocent", zero_stsd_wh=False):
-    """
-    Zero-RAM Streaming MP4 Rebuilder:
-    Reads ONLY `moov` into memory (< 2 MB) and streams `mdat` in 8 MB chunks on disk!
-    Never loads the entire 400MB-900MB video into RAM, preventing Server OOM crashes!
-    """
     file_size = os.path.getsize(filepath)
     moov_bytes = None
     mdat_pos = -1
@@ -926,14 +927,16 @@ def apply_exact_xuqing_1000x2166_structure(filepath, target_w=1000, target_h=216
                         op = cur + 16 + k * 4
                         if op + 4 <= cur + bsz:
                             old_v = struct.unpack(">I", buf[op:op+4])[0]
-                            struct.pack_into(">I", buf, op, old_v + delta)
+                            new_v = max(0, old_v + delta)
+                            struct.pack_into(">I", buf, op, new_v & 0xFFFFFFFF)
                 elif btp == b"co64":
                     cnt = struct.unpack(">I", buf[cur+12:cur+16])[0]
                     for k in range(cnt):
                         op = cur + 16 + k * 8
                         if op + 8 <= cur + bsz:
                             old_v = struct.unpack(">Q", buf[op:op+8])[0]
-                            struct.pack_into(">Q", buf, op, old_v + delta)
+                            new_v = max(0, old_v + delta)
+                            struct.pack_into(">Q", buf, op, new_v)
                 cur += bsz
         shift_stco(new_moov_children, 0, len(new_moov_children))
 
@@ -1058,10 +1061,6 @@ def parse_mp4_boxes_detailed(data, offset=0, end=None, depth=0):
 
 
 def generate_full_video_report(filepath):
-    """
-    Zero-RAM Video Inspector:
-    Reads ONLY top-level headers & non-mdat boxes into memory so even 1GB+ files use < 2MB RAM!
-    """
     file_size = os.path.getsize(filepath) if os.path.exists(filepath) else 0
     probe_json = get_full_ffprobe_json(filepath)
 
@@ -1150,10 +1149,22 @@ def run_encode_job_background(job_id, in_path, out_path, mode, method_name, orig
             update_job(
                 job_id,
                 stage=f"Instant 1-Sec Bypass ({target_w}x{target_h} • Keeping Original Quality & Bitrate)...",
-                progress=60,
-                eta="1s"
+                progress=45,
+                eta="2s"
             )
-            shutil.copyfile(in_path, out_path)
+            # Fast remux with -c copy +faststart so moov is guaranteed at front with valid stco/co64!
+            remux_cmd = [
+                "ffmpeg", "-y",
+                "-i", in_path,
+                "-map", "0:v:0",
+                "-map", "0:a:0?",
+                "-c", "copy",
+                "-movflags", "+faststart",
+                out_path
+            ]
+            res_remux = subprocess.run(remux_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            if res_remux.returncode != 0 or not os.path.exists(out_path):
+                shutil.copyfile(in_path, out_path)
         elif mode == "xuqing_1080x1920_hevc":
             update_job(
                 job_id,
@@ -1348,7 +1359,8 @@ def run_encode_job_background(job_id, in_path, out_path, mode, method_name, orig
 
         out_size = os.path.getsize(out_path) if os.path.exists(out_path) else 0
         base_name = os.path.splitext(orig_filename or "video")[0]
-        dl_name = f"{base_name}_{clean_method}_{target_w}x{target_h}.mp4"
+        raw_dl_name = f"{base_name}_{clean_method}_{target_w}x{target_h}.mp4"
+        dl_name = safe_ascii_filename(raw_dl_name, fallback=f"{clean_method}_{target_w}x{target_h}.mp4")
 
         update_job(
             job_id,
@@ -1369,7 +1381,6 @@ def index():
     return render_template_string(HTML_TEMPLATE)
 
 
-# --- Resumable Chunked Upload Endpoints (Step 1) ---
 @app.route("/api/init_upload", methods=["POST"])
 def api_init_upload():
     body = request.get_json(silent=True) or {}
@@ -1382,7 +1393,6 @@ def api_init_upload():
     in_path = os.path.join(JOBS_DIR, f"in_{job_id}.mp4")
     out_path = os.path.join(JOBS_DIR, f"out_{job_id}.mp4")
 
-    # Create empty input file for appending chunks
     with open(in_path, "wb") as f:
         pass
 
@@ -1399,7 +1409,7 @@ def api_init_upload():
         "next_chunk": 0,
         "in_path": in_path,
         "out_path": out_path,
-        "download_name": f"xuqingxinnocent_{filename}"
+        "download_name": safe_ascii_filename(f"xuqingxinnocent_{filename}")
     }
     save_job(job_id, job_data)
     return jsonify({"ok": True, "job_id": job_id})
@@ -1432,13 +1442,13 @@ def api_upload_chunk():
     chunk_file = request.files["chunk"]
     expected_idx = int(job.get("next_chunk", 0))
 
-    # Idempotent resumable write: only append if chunk_index matches expected_idx
     if chunk_index == expected_idx:
         with open(job["in_path"], "ab") as f:
-            chunk_file.save(f)
-        update_job(job_id, next_chunk=expected_idx + 1)
+            shutil.copyfileobj(chunk_file.stream, f, length=1024 * 1024)
+        expected_idx += 1
+        update_job(job_id, next_chunk=expected_idx)
 
-    return jsonify({"ok": True, "next_chunk": job.get("next_chunk", chunk_index + 1)})
+    return jsonify({"ok": True, "next_chunk": expected_idx})
 
 
 @app.route("/api/finalize_upload/<job_id>", methods=["POST"])
@@ -1466,7 +1476,6 @@ def api_finalize_upload(job_id):
     return jsonify({"ok": True, "job_id": job_id})
 
 
-# Keep legacy /api/start_job for backward compatibility
 @app.route("/api/start_job", methods=["POST"])
 def api_start_job():
     if "video" not in request.files:
@@ -1490,7 +1499,7 @@ def api_start_job():
         "orig_filename": video_file.filename,
         "in_path": in_path,
         "out_path": out_path,
-        "download_name": "xuqingxinnocent_HQ.mp4"
+        "download_name": safe_ascii_filename(f"xuqingxinnocent_{video_file.filename}")
     }
     save_job(job_id, job_data)
 
@@ -1548,9 +1557,9 @@ def api_download_job(job_id):
         return "File not found", 404
 
     file_size = os.path.getsize(out_path)
-    dl_name = job.get("download_name", f"xuqingxinnocent_{job_id}.mp4") if job else f"xuqingxinnocent_{job_id}.mp4"
+    raw_name = job.get("download_name", f"xuqingxinnocent_{job_id}.mp4") if job else f"xuqingxinnocent_{job_id}.mp4"
+    dl_name = safe_ascii_filename(raw_name, fallback=f"xuqingxinnocent_{job_id}.mp4")
 
-    # Support HTTP Range (206 Partial Content) so mobile browsers can pause & resume downloads seamlessly!
     range_header = request.headers.get("Range", None)
     start_byte = 0
     end_byte = file_size - 1
@@ -1562,14 +1571,18 @@ def api_download_job(job_id):
             start_byte = int(m.group(1))
             if m.group(2):
                 end_byte = min(file_size - 1, int(m.group(2)))
-            status_code = 206
+            if start_byte < file_size:
+                status_code = 206
+            else:
+                start_byte = 0
+                end_byte = file_size - 1
 
-    length = end_byte - start_byte + 1
+    length = max(0, end_byte - start_byte + 1)
     DOWNLOAD_PROGRESS[job_id] = {"sent": start_byte, "total": file_size, "done": False}
 
     def generate_file_chunks():
         sent = start_byte
-        chunk_sz = 1024 * 1024  # 1 MB smooth streaming chunks
+        chunk_sz = 1024 * 1024
         with open(out_path, "rb") as f:
             f.seek(start_byte)
             rem = length
@@ -1583,10 +1596,10 @@ def api_download_job(job_id):
                 yield data
         DOWNLOAD_PROGRESS[job_id] = {"sent": file_size, "total": file_size, "done": True}
 
-    resp = Response(generate_file_chunks(), status=status_code, mimetype="video/mp4", direct_passthrough=True)
+    resp = Response(generate_file_chunks(), status=status_code, mimetype="video/mp4")
     resp.headers["Content-Length"] = str(length)
     resp.headers["Accept-Ranges"] = "bytes"
-    resp.headers["Content-Disposition"] = f'attachment; filename="{dl_name}"'
+    resp.headers["Content-Disposition"] = f'attachment; filename="{dl_name}"; filename*=UTF-8\'\'{quote(dl_name)}'
     if status_code == 206:
         resp.headers["Content-Range"] = f"bytes {start_byte}-{end_byte}/{file_size}"
     return resp
