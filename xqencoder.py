@@ -9,7 +9,8 @@ import threading
 import subprocess
 import json
 import binascii
-from flask import Flask, request, render_template_string, send_file, jsonify
+from urllib.parse import quote
+from flask import Flask, request, render_template_string, send_file, jsonify, Response
 
 app = Flask(__name__)
 
@@ -17,13 +18,63 @@ JOBS_DIR = "/tmp/test_encoder_jobs"
 os.makedirs(JOBS_DIR, exist_ok=True)
 
 JOBS = {}
+DOWNLOAD_PROGRESS = {}
+
+
+def job_json_path(job_id):
+    return os.path.join(JOBS_DIR, f"job_{job_id}.json")
+
+
+def save_job(job_id, data):
+    JOBS[job_id] = data
+    try:
+        tmp_p = job_json_path(job_id) + ".tmp"
+        with open(tmp_p, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+        os.replace(tmp_p, job_json_path(job_id))
+    except Exception:
+        pass
+
+
+def load_job(job_id):
+    if job_id in JOBS:
+        return JOBS[job_id]
+    p = job_json_path(job_id)
+    if os.path.exists(p):
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                JOBS[job_id] = data
+                return data
+        except Exception:
+            pass
+    return None
+
+
+def update_job(job_id, **kwargs):
+    job = load_job(job_id)
+    if not job:
+        return
+    job.update(kwargs)
+    save_job(job_id, job)
+
+
+def safe_ascii_filename(name, fallback="xuqingxinnocent_HQ.mp4"):
+    clean = re.sub(r'[^A-Za-z0-9._-]+', '_', str(name or ""))
+    clean = clean.strip("._")
+    if not clean:
+        return fallback
+    if not clean.lower().endswith(".mp4"):
+        clean += ".mp4"
+    return clean
+
 
 HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="my">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>⚡ xuqingxinnocent 1000x2166 HQ Studio (20 Mbps H.264 • Shadowban: No)</title>
+    <title>⚡ xuqingxinnocent HQ Video Studio (Auto-Resume • Zero-RAM Stream • Shadowban: No)</title>
     <style>
         :root {
             --bg: #0b0d12;
@@ -126,6 +177,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             box-shadow: 0 4px 18px var(--accent-glow);
             transition: transform 0.15s ease, opacity 0.2s ease;
             white-space: nowrap;
+            text-decoration: none;
+            display: inline-block;
+            text-align: center;
         }
         .btn:hover { transform: translateY(-1px); }
         .btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
@@ -219,20 +273,20 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <body>
 <div class="container">
     <div class="header">
-        <h1>⚡ xuqingxinnocent 1000x2166 HQ Video Studio</h1>
-        <p>1000x2166 Custom 2K Portrait • H.264 (avc1) High/L5.2 @ 20 Mbps • METODE: xuqingxinnocent • Shadowban: No</p>
+        <h1>⚡ xuqingxinnocent HQ Video Studio (Auto-Resume Edition)</h1>
+        <p>Resumable Chunk Upload • Zero-RAM Direct Disk Download • 1000x2166 / 1080x1920 / 1440x1080 • METODE: xuqingxinnocent</p>
     </div>
 
     <div class="card">
-        <h3>🎬 ၁။ ဗီဒီယို အမြန်ထုတ်ယူရန် (Encode & Download with Live % Progress)</h3>
+        <h3>🎬 ၁။ ဗီဒီယို အမြန်ထုတ်ယူရန် (Auto-Resume Upload, Encode & Direct Stream Download)</h3>
         <p class="subtext">
-            မည်သည့် ဗီဒီယိုကိုမဆို <b>1000x2166 @ 60FPS H.264 (20 Mbps, High@L5.2, timescale=90000)</b> နှင့် <b>METODE: xuqingxinnocent</b> ဖွဲ့စည်းပုံအတိအကျသို့ ပြောင်းလဲပြီး တိုက်ရိုက် ဒေါင်းလုဒ်ဆွဲယူနိုင်ပါသည်။ Upload %, Encode % (ETA) နှင့် Download % တို့ကို အတန်းလေးဖြင့် တိကျစွာ ပြသပေးပါသည်။
+            <b>အသစ်ပြင်ဆင်ထားချက်များ:</b> (၁) အင်တာနက်လိုင်း ခေတ္တပြတ်သွားသော်လည်း Step 1 ကနေ ပြန်စစရာမလိုဘဲ ရောက်နေသည့်နေရာမှ အလိုအလျောက် ဆက်တင်ပေးသည်၊ (၂) Step 3 Download ဆွဲရာတွင် Browser RAM မသုံးတော့ဘဲ Direct Kernel Stream (send_file) ဖြင့် ဆွဲပေးသောကြောင့် ဖိုင်ဆိုဒ် 500MB~1GB ကျော်သော်လည်း 0B မဖြစ်တော့သလို အင်တာနက်လိုင်းလည်း လုံးဝ မနှေးတော့ပါ။
         </p>
 
         <div class="drop-zone" id="dropZone" onclick="document.getElementById('videoInput').click()">
             <input type="file" id="videoInput" accept="video/mp4,video/*">
             <div class="drop-title">📁 ဗီဒီယိုဖိုင် ရွေးချယ်ရန် နှိပ်ပါ (သို့မဟုတ်) ဆွဲထည့်ပါ</div>
-            <div class="drop-sub">Supports 1080p, 2K, 4K @ 60FPS / 120FPS MP4 & MOV</div>
+            <div class="drop-sub">Supports 1080p, 1440x1080, 2K, 4K @ 60FPS / 120FPS MP4 & MOV (Any File Size)</div>
             <div id="selectedFileBadge" class="selected-file" style="display:none;"></div>
         </div>
 
@@ -248,7 +302,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 <option value="xuqing_1080x1920_hevc">💎 Mode 8 (Re-Encode): 1080x1920 (Full HD) • HEVC / hvc1 (20 Mbps, Main/L4.1) + METODE: xuqingxinnocent</option>
             </select>
             <input type="text" id="customMethod" value="xuqingxinnocent" placeholder="METODE နာမည် (Default: xuqingxinnocent)">
-            <button class="btn" id="startBtn" onclick="startProcess()">🚀 Start Encode & Extract Video</button>
+            <button class="btn" id="startBtn" type="button" onclick="startProcess()">🚀 Start Encode & Extract Video</button>
         </div>
 
         <div class="progress-panel" id="progressPanel">
@@ -268,8 +322,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         <div class="result-banner" id="resultBanner">
             <h4 id="resultTitle">✅ ဗီဒီယို ပြောင်းလဲမှု 100% အောင်မြင်ပါသည်!</h4>
             <div class="dl-actions">
-                <button class="btn" id="downloadBtn" onclick="downloadOutputWithProgress()">⬇️ Download Video Now (With % Progress)</button>
-                <button class="btn btn-blue" onclick="toggleDetails()">🔍 View Full Input vs. Output X-Ray Details</button>
+                <a class="btn" id="downloadBtn" href="#" download>⬇️ Download Video Now (Direct High-Speed Download)</a>
+                <button class="btn btn-blue" type="button" onclick="loadAndToggleDetails()">🔍 View Full Input vs. Output X-Ray Details</button>
             </div>
         </div>
 
@@ -278,20 +332,20 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 <div>
                     <span class="section-tag tag-in">📥 Uploaded Input Video Details</span>
                     <h4>Input Summary</h4>
-                    <pre id="inSummaryPre"></pre>
+                    <pre id="inSummaryPre">Loading...</pre>
                     <h4>Input MP4 Box Structure</h4>
-                    <pre id="inBoxPre"></pre>
+                    <pre id="inBoxPre">Loading...</pre>
                     <h4>Input FFprobe Full JSON</h4>
-                    <pre id="inProbePre"></pre>
+                    <pre id="inProbePre">Loading...</pre>
                 </div>
                 <div>
-                    <span class="section-tag tag-out">📤 Output Video Details (1000x2166 • METODE: xuqingxinnocent)</span>
+                    <span class="section-tag tag-out">📤 Output Video Details (METODE: xuqingxinnocent)</span>
                     <h4>Output Summary</h4>
-                    <pre id="outSummaryPre"></pre>
+                    <pre id="outSummaryPre">Loading...</pre>
                     <h4>Output MP4 Box Structure (100% Exact Match)</h4>
-                    <pre id="outBoxPre"></pre>
+                    <pre id="outBoxPre">Loading...</pre>
                     <h4>Output FFprobe Full JSON</h4>
-                    <pre id="outProbePre"></pre>
+                    <pre id="outProbePre">Loading...</pre>
                 </div>
             </div>
         </div>
@@ -309,8 +363,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <script>
 let selectedFile = null;
 let currentJobId = null;
-let currentDownloadFilename = "xuqingxinnocent_1000x2166_HQ.mp4";
+let currentDownloadFilename = "xuqingxinnocent_HQ.mp4";
 let pollTimer = null;
+let detailsLoadedForJob = null;
+
+const CHUNK_SIZE = 5 * 1024 * 1024; // 5 MB resumable chunks
 
 const videoInput = document.getElementById('videoInput');
 const dropZone = document.getElementById('dropZone');
@@ -325,6 +382,24 @@ dropZone.addEventListener('drop', (e) => {
     e.preventDefault();
     dropZone.classList.remove('dragover');
     if (e.dataTransfer.files && e.dataTransfer.files[0]) selectFile(e.dataTransfer.files[0]);
+});
+
+window.addEventListener('DOMContentLoaded', async () => {
+    const savedJobId = localStorage.getItem('xuqing_last_job_id');
+    if (savedJobId) {
+        try {
+            const res = await fetch(`/api/job_status/${savedJobId}?t=${Date.now()}`);
+            if (res.ok) {
+                const data = await res.json();
+                currentJobId = savedJobId;
+                if (data.status === 'processing') {
+                    pollJobStatus(savedJobId);
+                } else if (data.status === 'done') {
+                    showCompletedJobUI(savedJobId, data);
+                }
+            }
+        } catch (e) {}
+    }
 });
 
 function formatBytes(bytes) {
@@ -356,11 +431,61 @@ function updateProgressUI(stage, pct, detail, eta) {
     const clamped = Math.max(0, Math.min(100, Math.round(pct)));
     document.getElementById('pctText').textContent = clamped + '%';
     document.getElementById('barFill').style.width = clamped + '%';
-    if (detail) document.getElementById('detailMeta').textContent = detail;
-    if (eta) document.getElementById('etaMeta').textContent = eta;
+    if (detail !== undefined) document.getElementById('detailMeta').textContent = detail;
+    if (eta !== undefined) document.getElementById('etaMeta').textContent = eta;
 }
 
-function startProcess() {
+function sleep(ms) {
+    return new Promise(r => setTimeout(r, ms));
+}
+
+function uploadSingleChunkWithProgress(jobId, chunkBlob, chunkIndex, totalChunks, baseLoaded, totalSize, uploadStart) {
+    return new Promise((resolve, reject) => {
+        const form = new FormData();
+        form.append('job_id', jobId);
+        form.append('chunk_index', String(chunkIndex));
+        form.append('total_chunks', String(totalChunks));
+        form.append('chunk', chunkBlob, 'chunk.part');
+
+        const xhr = new XMLHttpRequest();
+        xhr.timeout = 120000;
+
+        xhr.upload.addEventListener('progress', (e) => {
+            if (e.lengthComputable) {
+                const currentLoaded = Math.min(totalSize, baseLoaded + e.loaded);
+                const pct = (currentLoaded / totalSize) * 100;
+                const elapsed = Math.max(0.1, (Date.now() - uploadStart) / 1000);
+                const speed = currentLoaded / elapsed;
+                const remaining = speed > 0 ? ((totalSize - currentLoaded) / speed) : 0;
+                updateProgressUI(
+                    `📤 Step 1/3: Uploading Video (Chunk ${chunkIndex + 1}/${totalChunks})...`,
+                    pct,
+                    `Uploaded ${formatBytes(currentLoaded)} / ${formatBytes(totalSize)} (${formatBytes(speed)}/s)`,
+                    `Upload ETA: ${formatTime(remaining)}`
+                );
+            }
+        });
+
+        xhr.onload = () => {
+            if (xhr.status >= 200 && xhr.status < 300) {
+                try {
+                    resolve(JSON.parse(xhr.responseText));
+                } catch (err) {
+                    resolve({ ok: true });
+                }
+            } else {
+                reject(new Error('HTTP ' + xhr.status));
+            }
+        };
+        xhr.onerror = () => reject(new Error('Network drop'));
+        xhr.ontimeout = () => reject(new Error('Chunk timeout'));
+
+        xhr.open('POST', '/api/upload_chunk', true);
+        xhr.send(form);
+    });
+}
+
+async function startProcess() {
     if (!selectedFile) {
         alert('ကျေးဇူးပြု၍ ဗီဒီယိုဖိုင် အရင်ရွေးချယ်ပါ!');
         return;
@@ -372,160 +497,202 @@ function startProcess() {
     startBtn.disabled = true;
     document.getElementById('resultBanner').style.display = 'none';
     document.getElementById('detailsSection').style.display = 'none';
+    detailsLoadedForJob = null;
 
-    const formData = new FormData();
-    formData.append('video', selectedFile);
-    formData.append('mode', mode);
-    formData.append('method_name', customMethod);
+    const totalSize = selectedFile.size;
+    const totalChunks = Math.max(1, Math.ceil(totalSize / CHUNK_SIZE));
+    const fileSig = `${selectedFile.name}:${selectedFile.size}:${mode}:${customMethod}`;
 
-    const xhr = new XMLHttpRequest();
-    const uploadStart = Date.now();
+    let jobId = null;
+    let startChunk = 0;
 
-    xhr.upload.addEventListener('progress', (e) => {
-        if (e.lengthComputable) {
-            const pct = (e.loaded / e.total) * 100;
-            const elapsed = (Date.now() - uploadStart) / 1000;
-            const speed = elapsed > 0 ? (e.loaded / elapsed) : 0;
-            const remaining = speed > 0 ? ((e.total - e.loaded) / speed) : 0;
-            updateProgressUI(
-                '📤 Step 1/3: Uploading Video to Server...',
-                pct,
-                `Uploaded ${formatBytes(e.loaded)} / ${formatBytes(e.total)} (${formatBytes(speed)}/s)`,
-                `Upload ETA: ${formatTime(remaining)}`
-            );
+    const savedUploadSig = localStorage.getItem('xuqing_upload_sig');
+    const savedUploadJob = localStorage.getItem('xuqing_upload_job_id');
+    if (savedUploadSig === fileSig && savedUploadJob) {
+        try {
+            const chk = await fetch(`/api/upload_status/${savedUploadJob}?t=${Date.now()}`);
+            if (chk.ok) {
+                const st = await chk.json();
+                if (st.ok && typeof st.next_chunk === 'number') {
+                    jobId = savedUploadJob;
+                    startChunk = st.next_chunk;
+                }
+            }
+        } catch (e) {}
+    }
+
+    if (!jobId) {
+        let initOk = false;
+        for (let attempt = 1; attempt <= 6; attempt++) {
+            try {
+                updateProgressUI('📤 Step 1/3: Initializing Resumable Upload...', 0, 'Connecting to server...', 'ETA: Calculating...');
+                const initRes = await fetch('/api/init_upload', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        filename: selectedFile.name,
+                        filesize: totalSize,
+                        total_chunks: totalChunks,
+                        mode: mode,
+                        method_name: customMethod
+                    })
+                });
+                if (initRes.ok) {
+                    const initData = await initRes.json();
+                    jobId = initData.job_id;
+                    localStorage.setItem('xuqing_upload_sig', fileSig);
+                    localStorage.setItem('xuqing_upload_job_id', jobId);
+                    localStorage.setItem('xuqing_last_job_id', jobId);
+                    initOk = true;
+                    break;
+                }
+            } catch (e) {}
+            updateProgressUI(`⚠️ လိုင်းခေတ္တပြတ်နေပါသည် (Retry ${attempt}/6)...`, 0, 'Waiting for internet connection...', '');
+            await sleep(2500 * attempt);
         }
-    });
 
-    xhr.onload = function () {
-        if (xhr.status === 200) {
-            const resp = JSON.parse(xhr.responseText);
-            currentJobId = resp.job_id;
-            pollJobStatus(currentJobId);
-        } else {
+        if (!initOk || !jobId) {
             startBtn.disabled = false;
-            updateProgressUI('❌ Upload Error', 0, xhr.responseText || 'Server error', '');
+            updateProgressUI('❌ Connection Error', 0, 'Could not initialize upload. Please check internet connection.', '');
+            return;
         }
-    };
+    }
 
-    xhr.onerror = function () {
-        startBtn.disabled = false;
-        updateProgressUI('❌ Network Error', 0, 'Failed to connect to server', '');
-    };
+    currentJobId = jobId;
+    const uploadStart = Date.now() - (startChunk * CHUNK_SIZE / (2 * 1024 * 1024)) * 1000;
 
-    updateProgressUI('📤 Step 1/3: Starting Upload...', 0, 'Connecting...', 'ETA: Calculating...');
-    xhr.open('POST', '/api/start_job', true);
-    xhr.send(formData);
+    for (let idx = startChunk; idx < totalChunks; idx++) {
+        const startByte = idx * CHUNK_SIZE;
+        const endByte = Math.min(totalSize, startByte + CHUNK_SIZE);
+        const chunkBlob = selectedFile.slice(startByte, endByte);
+
+        let chunkSuccess = false;
+        for (let retry = 1; retry <= 10; retry++) {
+            try {
+                const resChunk = await uploadSingleChunkWithProgress(jobId, chunkBlob, idx, totalChunks, startByte, totalSize, uploadStart);
+                if (resChunk && typeof resChunk.next_chunk === 'number' && resChunk.next_chunk > idx + 1) {
+                    idx = resChunk.next_chunk - 1;
+                }
+                chunkSuccess = true;
+                break;
+            } catch (err) {
+                const curPct = (startByte / totalSize) * 100;
+                updateProgressUI(
+                    `⚠️ လိုင်းခေတ္တကျသွားပါသည် — Step 1 ပြန်စစရာမလိုဘဲ (${Math.round(curPct)}%) မှ အလိုအလျောက် ပြန်ချိတ်နေပါသည် (Retry ${retry}/10)...`,
+                    curPct,
+                    `Paused at ${formatBytes(startByte)} / ${formatBytes(totalSize)} — Waiting for network...`,
+                    'Auto-Resuming...'
+                );
+                await sleep(Math.min(10000, 2000 * retry));
+            }
+        }
+
+        if (!chunkSuccess) {
+            startBtn.disabled = false;
+            updateProgressUI(
+                '⚠️ Upload Paused (လိုင်းပြန်ကောင်းလာလျှင် Start ကို ပြန်နှိပ်ပါက ရောက်နေသည့် % မှ တန်းဆက်တင်ပါမည်)',
+                (startByte / totalSize) * 100,
+                `Saved at chunk ${idx}/${totalChunks} (${formatBytes(startByte)})`,
+                'Ready to Resume'
+            );
+            return;
+        }
+    }
+
+    localStorage.removeItem('xuqing_upload_sig');
+    localStorage.removeItem('xuqing_upload_job_id');
+    localStorage.setItem('xuqing_last_job_id', jobId);
+
+    for (let retry = 1; retry <= 6; retry++) {
+        try {
+            const finRes = await fetch(`/api/finalize_upload/${jobId}`, { method: 'POST' });
+            if (finRes.ok) break;
+        } catch (e) {
+            await sleep(2000);
+        }
+    }
+
+    pollJobStatus(jobId);
+}
+
+function showCompletedJobUI(jobId, data) {
+    currentJobId = jobId;
+    currentDownloadFilename = data.download_name || 'xuqingxinnocent_HQ.mp4';
+    const dlUrl = `/api/download_job/${jobId}?t=${Date.now()}`;
+
+    updateProgressUI(
+        '✅ Step 2/3 Complete: Video Ready! Downloading to Your Device...',
+        100,
+        `${data.message} • Output Size: ${formatBytes(data.output_size)}`,
+        'Ready to Download'
+    );
+
+    const dlBtn = document.getElementById('downloadBtn');
+    dlBtn.href = dlUrl;
+    dlBtn.setAttribute('download', currentDownloadFilename);
+
+    document.getElementById('resultTitle').textContent = `✅ ${data.message} (${formatBytes(data.output_size)})`;
+    document.getElementById('resultBanner').style.display = 'block';
+    document.getElementById('startBtn').disabled = false;
 }
 
 function pollJobStatus(jobId) {
     if (pollTimer) clearInterval(pollTimer);
+    let consecutiveErrors = 0;
+
     pollTimer = setInterval(async () => {
         try {
             const res = await fetch(`/api/job_status/${jobId}?t=${Date.now()}`);
             if (!res.ok) return;
             const data = await res.json();
+            consecutiveErrors = 0;
 
             if (data.status === 'processing') {
                 updateProgressUI(
-                    `⚙️ Step 2/3: ${data.stage || 'Encoding 1000x2166 H.264 60FPS...'}`,
+                    `⚙️ Step 2/3: ${data.stage || 'Processing Video...'}`,
                     data.progress || 0,
-                    data.detail || 'Applying xuqingxinnocent 1000x2166 formula...',
+                    data.detail || 'Applying xuqingxinnocent formula...',
                     `Encode ETA: ${data.eta || 'Calculating...'}`
                 );
             } else if (data.status === 'done') {
                 clearInterval(pollTimer);
-                updateProgressUI(
-                    '✅ Step 2/3 Complete: Video Rebuilt to 1000x2166 (METODE: xuqingxinnocent)!',
-                    100,
-                    `${data.message} • Output Size: ${formatBytes(data.output_size)}`,
-                    'ETA: 0s (Ready)'
-                );
-                currentDownloadFilename = data.download_name || 'xuqingxinnocent_1000x2166_HQ.mp4';
-
-                document.getElementById('inSummaryPre').textContent = data.in_summary || '';
-                document.getElementById('inBoxPre').textContent = data.in_box_tree || '';
-                document.getElementById('inProbePre').textContent = data.in_probe || '';
-
-                document.getElementById('outSummaryPre').textContent = data.out_summary || '';
-                document.getElementById('outBoxPre').textContent = data.out_box_tree || '';
-                document.getElementById('outProbePre').textContent = data.out_probe || '';
-
-                document.getElementById('resultTitle').textContent = `✅ ${data.message} (${formatBytes(data.output_size)})`;
-                document.getElementById('resultBanner').style.display = 'block';
-                document.getElementById('startBtn').disabled = false;
-
-                downloadOutputWithProgress();
+                showCompletedJobUI(jobId, data);
+                // Direct browser navigation to attachment URL (never blocked by mobile browsers!)
+                window.location.assign(`/api/download_job/${jobId}?t=${Date.now()}`);
             } else if (data.status === 'error') {
                 clearInterval(pollTimer);
                 updateProgressUI('❌ Encoding Error', 0, data.error || 'Unknown error', '');
                 document.getElementById('startBtn').disabled = false;
             }
-        } catch (e) {}
-    }, 600);
+        } catch (e) {
+            consecutiveErrors++;
+            if (consecutiveErrors > 3) {
+                document.getElementById('etaMeta').textContent = '⚠️ Reconnecting to server... (Server is still encoding)';
+            }
+        }
+    }, 800);
 }
 
-function downloadOutputWithProgress() {
-    if (!currentJobId) return;
-    const dlBtn = document.getElementById('downloadBtn');
-    dlBtn.disabled = true;
-
-    const xhr = new XMLHttpRequest();
-    const dlStart = Date.now();
-    xhr.open('GET', `/api/download_job/${currentJobId}`, true);
-    xhr.responseType = 'blob';
-
-    xhr.onprogress = function (e) {
-        if (e.lengthComputable && e.total > 0) {
-            const pct = (e.loaded / e.total) * 100;
-            const elapsed = (Date.now() - dlStart) / 1000;
-            const speed = elapsed > 0 ? (e.loaded / elapsed) : 0;
-            const remaining = speed > 0 ? ((e.total - e.loaded) / speed) : 0;
-            updateProgressUI(
-                '⬇️ Step 3/3: Downloading Video to Your Device...',
-                pct,
-                `Downloaded ${formatBytes(e.loaded)} / ${formatBytes(e.total)} (${formatBytes(speed)}/s)`,
-                `Download ETA: ${formatTime(remaining)}`
-            );
-        }
-    };
-
-    xhr.onload = function () {
-        dlBtn.disabled = false;
-        if (xhr.status === 200) {
-            updateProgressUI(
-                '🎉 All Steps Complete! Video Saved to Your Device!',
-                100,
-                `File: ${currentDownloadFilename} (${formatBytes(xhr.response.size)})`,
-                'Completed in ' + formatTime((Date.now() - dlStart) / 1000)
-            );
-            const blobUrl = window.URL.createObjectURL(xhr.response);
-            const a = document.createElement('a');
-            a.style.display = 'none';
-            a.href = blobUrl;
-            a.download = currentDownloadFilename;
-            document.body.appendChild(a);
-            a.click();
-            setTimeout(() => {
-                window.URL.revokeObjectURL(blobUrl);
-                a.remove();
-            }, 2000);
-        } else {
-            updateProgressUI('❌ Download Failed', 0, 'Could not download output file', '');
-        }
-    };
-
-    xhr.onerror = function () {
-        dlBtn.disabled = false;
-        updateProgressUI('❌ Download Network Error', 0, 'Connection interrupted', '');
-    };
-
-    updateProgressUI('⬇️ Step 3/3: Starting Video Download...', 0, 'Requesting file stream...', 'Download ETA: Calculating...');
-    xhr.send();
-}
-
-function toggleDetails() {
+async function loadAndToggleDetails() {
     const el = document.getElementById('detailsSection');
-    el.style.display = (el.style.display === 'none' || !el.style.display) ? 'block' : 'none';
+    const isHidden = (el.style.display === 'none' || !el.style.display);
+    el.style.display = isHidden ? 'block' : 'none';
+
+    if (isHidden && currentJobId && detailsLoadedForJob !== currentJobId) {
+        try {
+            const res = await fetch(`/api/job_details/${currentJobId}`);
+            if (res.ok) {
+                const d = await res.json();
+                document.getElementById('inSummaryPre').textContent = d.in_summary || '';
+                document.getElementById('inBoxPre').textContent = d.in_box_tree || '';
+                document.getElementById('inProbePre').textContent = d.in_probe || '';
+                document.getElementById('outSummaryPre').textContent = d.out_summary || '';
+                document.getElementById('outBoxPre').textContent = d.out_box_tree || '';
+                document.getElementById('outProbePre').textContent = d.out_probe || '';
+                detailsLoadedForJob = currentJobId;
+            }
+        } catch (e) {}
+    }
 }
 </script>
 </body>
@@ -537,6 +704,7 @@ EXACT_MVHD_120B = bytes.fromhex("000000786d7668640100000000000000000000000000000
 EXACT_COLR_19B = bytes.fromhex("00000013636f6c726e636c7800010001000100")
 EXACT_PASP_16B = bytes.fromhex("00000010706173700000000100000001")
 EXACT_BTRT_20B = bytes.fromhex("00000014627472740000000001312d0001312d00")
+
 
 def build_apple_ilst_udta(method_name="xuqingxinnocent"):
     clean_name = (method_name or "xuqingxinnocent").strip()
@@ -564,33 +732,39 @@ def build_apple_ilst_udta(method_name="xuqingxinnocent"):
 
 
 def apply_exact_xuqing_1000x2166_structure(filepath, target_w=1000, target_h=2166, method_name="xuqingxinnocent", zero_stsd_wh=False):
-    with open(filepath, "rb") as f:
-        raw = f.read()
-
-    pos = 0
-    end = len(raw)
+    file_size = os.path.getsize(filepath)
     moov_bytes = None
     mdat_pos = -1
-    mdat_bytes = None
-    while pos + 8 <= end:
-        sz = struct.unpack(">I", raw[pos:pos+4])[0]
-        tp = raw[pos+4:pos+8]
-        if sz == 1:
-            sz = struct.unpack(">Q", raw[pos+8:pos+16])[0]
-        elif sz == 0:
-            sz = end - pos
-        if sz < 8 or pos + sz > end:
-            break
-        if tp == b"moov":
-            moov_bytes = raw[pos:pos+sz]
-        elif tp == b"mdat":
-            mdat_pos = pos
-            mdat_bytes = raw[pos:pos+sz]
-            break
-        pos += sz
+    mdat_size = 0
 
-    if not moov_bytes or not mdat_bytes:
-        return "Failed: moov or mdat not found"
+    with open(filepath, "rb") as f:
+        pos = 0
+        while pos + 8 <= file_size:
+            f.seek(pos)
+            hdr = f.read(16)
+            if len(hdr) < 8:
+                break
+            sz = struct.unpack(">I", hdr[:4])[0]
+            tp = hdr[4:8]
+            if sz == 1:
+                if len(hdr) < 16:
+                    break
+                sz = struct.unpack(">Q", hdr[8:16])[0]
+            elif sz == 0:
+                sz = file_size - pos
+            if sz < 8 or pos + sz > file_size:
+                sz = file_size - pos
+
+            if tp == b"moov":
+                f.seek(pos)
+                moov_bytes = f.read(sz)
+            elif tp == b"mdat" and (sz > mdat_size):
+                mdat_pos = pos
+                mdat_size = sz
+            pos += sz
+
+    if not moov_bytes or mdat_pos == -1 or mdat_size <= 8:
+        return f"Skipped header rebuild (kept original valid MP4, size={file_size}B)"
 
     def rebuild_box(box_data, is_video_trak=False):
         btype = box_data[4:8]
@@ -639,6 +813,11 @@ def apply_exact_xuqing_1000x2166_structure(filepath, target_w=1000, target_h=216
                         struct.pack_into(">I", avc1_hdr, 0, avc1_size)
                         avc1_box = bytes(avc1_hdr) + avc1_children
                         return struct.pack(">I4sII", 16 + len(avc1_box), b"stsd", 0, 1) + avc1_box
+                elif entry_type in (b"hvc1", b"hev1"):
+                    out_stsd = bytearray(box_data)
+                    if not zero_stsd_wh and len(out_stsd) >= 16 + 36:
+                        struct.pack_into(">HH", out_stsd, 16 + 32, target_w, target_h)
+                    return bytes(out_stsd)
 
         containers = {b"trak", b"mdia", b"minf", b"stbl"}
         if btype not in containers:
@@ -693,25 +872,38 @@ def apply_exact_xuqing_1000x2166_structure(filepath, target_w=1000, target_h=216
                         op = cur + 16 + k * 4
                         if op + 4 <= cur + bsz:
                             old_v = struct.unpack(">I", buf[op:op+4])[0]
-                            struct.pack_into(">I", buf, op, old_v + delta)
+                            new_v = max(0, old_v + delta)
+                            struct.pack_into(">I", buf, op, new_v & 0xFFFFFFFF)
                 elif btp == b"co64":
                     cnt = struct.unpack(">I", buf[cur+12:cur+16])[0]
                     for k in range(cnt):
                         op = cur + 16 + k * 8
                         if op + 8 <= cur + bsz:
                             old_v = struct.unpack(">Q", buf[op:op+8])[0]
-                            struct.pack_into(">Q", buf, op, old_v + delta)
+                            new_v = max(0, old_v + delta)
+                            struct.pack_into(">Q", buf, op, new_v)
                 cur += bsz
         shift_stco(new_moov_children, 0, len(new_moov_children))
 
     new_moov_box = struct.pack(">I4s", new_moov_size, b"moov") + bytes(new_moov_children)
 
-    with open(filepath, "wb") as f:
-        f.write(EXACT_AVC1_FTYP_32B)
-        f.write(new_moov_box)
-        f.write(mdat_bytes)
+    tmp_out = filepath + ".rebuilding"
+    CHUNK_SIZE = 8 * 1024 * 1024
+    with open(filepath, "rb") as fin, open(tmp_out, "wb") as fout:
+        fout.write(EXACT_AVC1_FTYP_32B)
+        fout.write(new_moov_box)
+        fin.seek(mdat_pos)
+        remaining = mdat_size
+        while remaining > 0:
+            chunk = fin.read(min(CHUNK_SIZE, remaining))
+            if not chunk:
+                break
+            fout.write(chunk)
+            remaining -= len(chunk)
 
-    return f"Rebuilt 1000x2166 H.264 HQ (METODE: {method_name}, moov={new_moov_size}B)"
+    os.replace(tmp_out, filepath)
+    return f"Rebuilt {target_w}x{target_h} HQ (METODE: {method_name}, moov={new_moov_size}B)"
+
 
 def get_full_ffprobe_json(filepath):
     cmd = [
@@ -727,6 +919,7 @@ def get_full_ffprobe_json(filepath):
         except Exception:
             return {"raw_stdout": res.stdout}
     return {"error": res.stderr}
+
 
 def parse_mp4_boxes_detailed(data, offset=0, end=None, depth=0):
     if end is None:
@@ -811,12 +1004,43 @@ def parse_mp4_boxes_detailed(data, offset=0, end=None, depth=0):
         pos += size
     return boxes
 
+
 def generate_full_video_report(filepath):
     file_size = os.path.getsize(filepath) if os.path.exists(filepath) else 0
     probe_json = get_full_ffprobe_json(filepath)
-    with open(filepath, "rb") as f:
-        raw_bytes = f.read()
-    box_tree_str = "\n".join(parse_mp4_boxes_detailed(raw_bytes))
+
+    boxes = []
+    if os.path.exists(filepath):
+        with open(filepath, "rb") as f:
+            pos = 0
+            while pos + 8 <= file_size:
+                f.seek(pos)
+                hdr = f.read(16)
+                if len(hdr) < 8:
+                    break
+                sz = struct.unpack(">I", hdr[:4])[0]
+                btype = hdr[4:8]
+                header_size = 8
+                if sz == 1:
+                    if len(hdr) < 16:
+                        break
+                    sz = struct.unpack(">Q", hdr[8:16])[0]
+                    header_size = 16
+                elif sz == 0:
+                    sz = file_size - pos
+                if sz < header_size or pos + sz > file_size:
+                    break
+
+                if btype == b"mdat" or sz > 25 * 1024 * 1024:
+                    btype_str = btype.decode('latin1', errors='replace')
+                    boxes.append(f"[{btype_str}] offset={pos} size={sz} (media bitstream payload)")
+                else:
+                    f.seek(pos)
+                    box_bytes = f.read(sz)
+                    boxes.extend(parse_mp4_boxes_detailed(box_bytes, 0, len(box_bytes), 0))
+                pos += sz
+
+    box_tree_str = "\n".join(boxes)
 
     streams = probe_json.get("streams", [])
     vstream = next((s for s in streams if s.get("codec_type") == "video"), {})
@@ -842,13 +1066,10 @@ def generate_full_video_report(filepath):
     return summary, box_tree_str, json.dumps(probe_json, indent=2)
 
 
-
 def run_encode_job_background(job_id, in_path, out_path, mode, method_name, orig_filename):
     try:
-        JOBS[job_id]["stage"] = "Inspecting Input Video..."
-        JOBS[job_id]["progress"] = 5
-        in_summary, in_box_tree, in_probe_pretty = generate_full_video_report(in_path)
-        in_probe_data = json.loads(in_probe_pretty)
+        update_job(job_id, stage="Inspecting Input Video...", progress=5)
+        in_probe_data = get_full_ffprobe_json(in_path)
         in_streams = in_probe_data.get("streams", [])
         in_v = next((s for s in in_streams if s.get("codec_type") == "video"), {})
         in_w = int(in_v.get("width") or 1080)
@@ -862,7 +1083,6 @@ def run_encode_job_background(job_id, in_path, out_path, mode, method_name, orig
         elif mode == "header_only":
             target_w, target_h = (in_w, in_h)
         else:
-            # 1000x2166 Custom 2K Portrait
             target_w, target_h = (2166, 1000) if is_landscape else (1000, 2166)
 
         fmt = in_probe_data.get("format", {})
@@ -871,14 +1091,30 @@ def run_encode_job_background(job_id, in_path, out_path, mode, method_name, orig
         ver_method = f"{clean_method}-v2.0.0"
 
         if mode in ("header_only", "instant_1000x2166", "instant_1080x1920", "instant_1440x1080"):
-            JOBS[job_id]["stage"] = f"Instant 1-Sec Bypass ({target_w}x{target_h} • Keeping Original Quality & Bitrate)..."
-            JOBS[job_id]["progress"] = 60
-            JOBS[job_id]["eta"] = "1s"
-            shutil.copyfile(in_path, out_path)
+            update_job(
+                job_id,
+                stage=f"Instant 1-Sec Bypass ({target_w}x{target_h} • Keeping Original Quality & Bitrate)...",
+                progress=45,
+                eta="2s"
+            )
+            remux_cmd = [
+                "ffmpeg", "-y",
+                "-i", in_path,
+                "-map", "0:v:0",
+                "-map", "0:a:0?",
+                "-c", "copy",
+                "-movflags", "+faststart",
+                out_path
+            ]
+            res_remux = subprocess.run(remux_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            if res_remux.returncode != 0 or (not os.path.exists(out_path)) or os.path.getsize(out_path) < 1024:
+                shutil.copyfile(in_path, out_path)
         elif mode == "xuqing_1080x1920_hevc":
-            JOBS[job_id]["stage"] = f"Encoding {in_w}x{in_h} ➔ {target_w}x{target_h} HEVC (22.3 Mbps, Main@L4.1)..."
-            JOBS[job_id]["progress"] = 10
-
+            update_job(
+                job_id,
+                stage=f"Encoding {in_w}x{in_h} ➔ {target_w}x{target_h} HEVC (20 Mbps, Main@L4.1)...",
+                progress=10
+            )
             vf_chain = (
                 f"scale={target_w}:{target_h}:flags=lanczos+accurate_rnd+full_chroma_int,"
                 "setsar=1/1,"
@@ -893,7 +1129,7 @@ def run_encode_job_background(job_id, in_path, out_path, mode, method_name, orig
                 "tu-inter-depth=1:tu-intra-depth=1:signhide=1:strong-intra-smoothing=1:"
                 "max-merge=2:limit-refs=3:me=1:subme=2:merange=57:weightp=1:no-weightb=1:"
                 "deblock=0,0:sao=1:selective-sao=4:early-skip=1:rskip=1:fast-intra=1:"
-                "psy-rd=2.00:vbv-maxrate=24000:vbv-bufsize=48000:vbv-init=0.9:"
+                "psy-rd=2.00:vbv-maxrate=22000:vbv-bufsize=40000:vbv-init=0.9:"
                 "aq-mode=2:aq-strength=1.00:cutree=1:qg-size=32:sar=1:"
                 "range=full:colorprim=bt709:transfer=bt709:colormatrix=bt709:chromaloc=1:info=1"
             )
@@ -931,6 +1167,7 @@ def run_encode_job_background(job_id, in_path, out_path, mode, method_name, orig
             start_t = time.time()
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
             tail_lines = []
+            last_save_t = 0
             for line in proc.stdout:
                 tail_lines.append(line)
                 if len(tail_lines) > 40:
@@ -939,39 +1176,42 @@ def run_encode_job_background(job_id, in_path, out_path, mode, method_name, orig
                     try:
                         val_us = int(line.split("=", 1)[1].strip())
                         cur_sec = val_us / 1_000_000.0
-                        if total_dur > 0 and cur_sec >= 0:
+                        now_t = time.time()
+                        if total_dur > 0 and cur_sec >= 0 and (now_t - last_save_t >= 0.6):
+                            last_save_t = now_t
                             ratio = min(0.99, cur_sec / total_dur)
                             pct = int(10 + ratio * 82)
-                            elapsed = time.time() - start_t
+                            elapsed = now_t - start_t
                             eta_sec = max(0, int((elapsed / ratio) - elapsed)) if ratio > 0.02 else 0
                             eta_str = (f"{eta_sec // 60}m {eta_sec % 60}s" if eta_sec >= 60 else f"{eta_sec}s") if ratio > 0.02 else "Calculating..."
-                            JOBS[job_id]["progress"] = pct
-                            JOBS[job_id]["detail"] = f"Encoded {cur_sec:.1f}s / {total_dur:.1f}s ({target_w}x{target_h} HEVC 22.3 Mbps)"
-                            JOBS[job_id]["eta"] = eta_str
+                            update_job(
+                                job_id,
+                                progress=pct,
+                                detail=f"Encoded {cur_sec:.1f}s / {total_dur:.1f}s ({target_w}x{target_h} HEVC 20 Mbps)",
+                                eta=eta_str
+                            )
                     except Exception:
                         pass
             proc.wait()
             if proc.returncode != 0:
-                JOBS[job_id]["status"] = "error"
-                JOBS[job_id]["error"] = "FFmpeg failed: " + "".join(tail_lines[-15:])
+                update_job(job_id, status="error", error="FFmpeg failed: " + "".join(tail_lines[-15:]))
                 return
         else:
-            # H.264 20 Mbps High@L5.2 (supports both 1000x2166 and 1080x1920)
-            JOBS[job_id]["stage"] = f"Encoding {in_w}x{in_h} ➔ {target_w}x{target_h} H.264 (20 Mbps, High@L5.2)..."
-            JOBS[job_id]["progress"] = 10
-
+            update_job(
+                job_id,
+                stage=f"Encoding {in_w}x{in_h} ➔ {target_w}x{target_h} H.264 (20 Mbps, High@L5.2)...",
+                progress=10
+            )
             vf_chain = (
                 f"scale={target_w}:{target_h}:flags=lanczos+accurate_rnd+full_chroma_int,"
                 "setsar=1/1,"
                 "fps=60,"
                 "format=yuv420p"
             )
-
             x264_params = (
                 "ref=1:bframes=1:b-adapt=0:keyint=30:min-keyint=15:scenecut=40:"
                 "nal-hrd=none:colorprim=bt709:transfer=bt709:colormatrix=bt709:fullrange=off"
             )
-
             cmd = [
                 "ffmpeg", "-y",
                 "-threads", "2",
@@ -1010,15 +1250,9 @@ def run_encode_job_background(job_id, in_path, out_path, mode, method_name, orig
             ]
 
             start_t = time.time()
-            proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1
-            )
-
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
             tail_lines = []
+            last_save_t = 0
             for line in proc.stdout:
                 tail_lines.append(line)
                 if len(tail_lines) > 40:
@@ -1027,30 +1261,37 @@ def run_encode_job_background(job_id, in_path, out_path, mode, method_name, orig
                     try:
                         val_us = int(line.split("=", 1)[1].strip())
                         cur_sec = val_us / 1_000_000.0
-                        if total_dur > 0 and cur_sec >= 0:
+                        now_t = time.time()
+                        if total_dur > 0 and cur_sec >= 0 and (now_t - last_save_t >= 0.6):
+                            last_save_t = now_t
                             ratio = min(0.99, cur_sec / total_dur)
                             pct = int(10 + ratio * 82)
-                            elapsed = time.time() - start_t
+                            elapsed = now_t - start_t
                             if ratio > 0.02:
                                 eta_sec = max(0, int((elapsed / ratio) - elapsed))
                                 eta_str = f"{eta_sec // 60}m {eta_sec % 60}s" if eta_sec >= 60 else f"{eta_sec}s"
                             else:
                                 eta_str = "Calculating..."
-                            JOBS[job_id]["progress"] = pct
-                            JOBS[job_id]["detail"] = f"Encoded {cur_sec:.1f}s / {total_dur:.1f}s ({target_w}x{target_h} H.264 20 Mbps)"
-                            JOBS[job_id]["eta"] = eta_str
+                            update_job(
+                                job_id,
+                                progress=pct,
+                                detail=f"Encoded {cur_sec:.1f}s / {total_dur:.1f}s ({target_w}x{target_h} H.264 20 Mbps)",
+                                eta=eta_str
+                            )
                     except Exception:
                         pass
 
             proc.wait()
             if proc.returncode != 0:
-                JOBS[job_id]["status"] = "error"
-                JOBS[job_id]["error"] = "FFmpeg failed: " + "".join(tail_lines[-15:])
+                update_job(job_id, status="error", error="FFmpeg failed: " + "".join(tail_lines[-15:]))
                 return
 
-        JOBS[job_id]["stage"] = f"Injecting METODE: {clean_method} & {target_w}x{target_h} Box Hierarchy..."
-        JOBS[job_id]["progress"] = 95
-        JOBS[job_id]["eta"] = "1s"
+        update_job(
+            job_id,
+            stage=f"Injecting METODE: {clean_method} & {target_w}x{target_h} Box Hierarchy (Zero-RAM Stream)...",
+            progress=95,
+            eta="1s"
+        )
 
         msg = apply_exact_xuqing_1000x2166_structure(
             out_path,
@@ -1060,35 +1301,123 @@ def run_encode_job_background(job_id, in_path, out_path, mode, method_name, orig
             zero_stsd_wh=False
         )
 
-        out_summary, out_box_tree, out_probe_pretty = generate_full_video_report(out_path)
         out_size = os.path.getsize(out_path) if os.path.exists(out_path) else 0
-
         base_name = os.path.splitext(orig_filename or "video")[0]
-        dl_name = f"{base_name}_{clean_method}_{target_w}x{target_h}.mp4"
+        raw_dl_name = f"{base_name}_{clean_method}_{target_w}x{target_h}.mp4"
+        dl_name = safe_ascii_filename(raw_dl_name, fallback=f"{clean_method}_{target_w}x{target_h}.mp4")
 
-        JOBS[job_id].update({
-            "status": "done",
-            "progress": 100,
-            "stage": "Completed!",
-            "eta": "0s",
-            "message": msg,
-            "output_size": out_size,
-            "download_name": dl_name,
-            "in_summary": json.dumps(in_summary, indent=2),
-            "in_box_tree": in_box_tree,
-            "in_probe": in_probe_pretty,
-            "out_summary": json.dumps(out_summary, indent=2),
-            "out_box_tree": out_box_tree,
-            "out_probe": out_probe_pretty
-        })
+        update_job(
+            job_id,
+            status="done",
+            progress=100,
+            stage="Completed!",
+            eta="0s",
+            message=msg,
+            output_size=out_size,
+            download_name=dl_name
+        )
     except Exception as e:
-        JOBS[job_id]["status"] = "error"
-        JOBS[job_id]["error"] = str(e)
+        update_job(job_id, status="error", error=str(e))
 
 
 @app.route("/", methods=["GET"])
 def index():
     return render_template_string(HTML_TEMPLATE)
+
+
+@app.route("/api/init_upload", methods=["POST"])
+def api_init_upload():
+    body = request.get_json(silent=True) or {}
+    filename = body.get("filename", "video.mp4")
+    total_chunks = int(body.get("total_chunks") or 1)
+    mode = body.get("mode", "header_only")
+    method_name = body.get("method_name", "xuqingxinnocent")
+
+    job_id = uuid.uuid4().hex[:12]
+    in_path = os.path.join(JOBS_DIR, f"in_{job_id}.mp4")
+    out_path = os.path.join(JOBS_DIR, f"out_{job_id}.mp4")
+
+    with open(in_path, "wb") as f:
+        pass
+
+    job_data = {
+        "status": "uploading",
+        "progress": 0,
+        "stage": "Uploading Video...",
+        "detail": f"File: {filename}",
+        "eta": "Calculating...",
+        "orig_filename": filename,
+        "mode": mode,
+        "method_name": method_name,
+        "total_chunks": total_chunks,
+        "next_chunk": 0,
+        "in_path": in_path,
+        "out_path": out_path,
+        "download_name": safe_ascii_filename(f"xuqingxinnocent_{filename}")
+    }
+    save_job(job_id, job_data)
+    return jsonify({"ok": True, "job_id": job_id})
+
+
+@app.route("/api/upload_status/<job_id>", methods=["GET"])
+def api_upload_status(job_id):
+    job = load_job(job_id)
+    if not job:
+        return jsonify({"ok": False}), 404
+    return jsonify({
+        "ok": True,
+        "status": job.get("status"),
+        "next_chunk": job.get("next_chunk", 0),
+        "total_chunks": job.get("total_chunks", 1)
+    })
+
+
+@app.route("/api/upload_chunk", methods=["POST"])
+def api_upload_chunk():
+    job_id = request.form.get("job_id", "")
+    chunk_index = int(request.form.get("chunk_index", 0))
+    job = load_job(job_id)
+    if not job:
+        return jsonify({"error": "Job not found"}), 404
+
+    if "chunk" not in request.files:
+        return jsonify({"error": "No chunk"}), 400
+
+    chunk_file = request.files["chunk"]
+    expected_idx = int(job.get("next_chunk", 0))
+
+    if chunk_index == expected_idx:
+        with open(job["in_path"], "ab") as f:
+            shutil.copyfileobj(chunk_file.stream, f, length=1024 * 1024)
+        expected_idx += 1
+        update_job(job_id, next_chunk=expected_idx)
+
+    return jsonify({"ok": True, "next_chunk": expected_idx})
+
+
+@app.route("/api/finalize_upload/<job_id>", methods=["POST"])
+def api_finalize_upload(job_id):
+    job = load_job(job_id)
+    if not job:
+        return jsonify({"error": "Job not found"}), 404
+
+    if job.get("status") == "uploading":
+        update_job(job_id, status="processing", progress=2, stage="Starting Video Pipeline...")
+        t = threading.Thread(
+            target=run_encode_job_background,
+            args=(
+                job_id,
+                job["in_path"],
+                job["out_path"],
+                job.get("mode", "header_only"),
+                job.get("method_name", "xuqingxinnocent"),
+                job.get("orig_filename", "video.mp4")
+            ),
+            daemon=True
+        )
+        t.start()
+
+    return jsonify({"ok": True, "job_id": job_id})
 
 
 @app.route("/api/start_job", methods=["POST"])
@@ -1105,16 +1434,18 @@ def api_start_job():
     out_path = os.path.join(JOBS_DIR, f"out_{job_id}.mp4")
     video_file.save(in_path)
 
-    JOBS[job_id] = {
+    job_data = {
         "status": "processing",
         "progress": 2,
         "stage": "Starting Video Pipeline...",
         "detail": f"File: {video_file.filename}",
         "eta": "Calculating...",
+        "orig_filename": video_file.filename,
         "in_path": in_path,
         "out_path": out_path,
-        "download_name": "xuqingxinnocent_1000x2166_HQ.mp4"
+        "download_name": safe_ascii_filename(f"xuqingxinnocent_{video_file.filename}")
     }
+    save_job(job_id, job_data)
 
     t = threading.Thread(
         target=run_encode_job_background,
@@ -1128,22 +1459,62 @@ def api_start_job():
 
 @app.route("/api/job_status/<job_id>", methods=["GET"])
 def api_job_status(job_id):
-    job = JOBS.get(job_id)
+    job = load_job(job_id)
     if not job:
         return jsonify({"error": "Job not found"}), 404
     return jsonify(job)
 
 
+@app.route("/api/job_details/<job_id>", methods=["GET"])
+def api_job_details(job_id):
+    job = load_job(job_id)
+    if not job or not os.path.exists(job.get("out_path", "")):
+        return jsonify({"error": "Job not found"}), 404
+
+    in_summary, in_box_tree, in_probe_pretty = generate_full_video_report(job["in_path"])
+    out_summary, out_box_tree, out_probe_pretty = generate_full_video_report(job["out_path"])
+    return jsonify({
+        "in_summary": json.dumps(in_summary, indent=2),
+        "in_box_tree": in_box_tree,
+        "in_probe": in_probe_pretty,
+        "out_summary": json.dumps(out_summary, indent=2),
+        "out_box_tree": out_box_tree,
+        "out_probe": out_probe_pretty
+    })
+
+
+@app.route("/api/download_progress/<job_id>", methods=["GET"])
+def api_download_progress(job_id):
+    prog = DOWNLOAD_PROGRESS.get(job_id)
+    if not prog:
+        job = load_job(job_id)
+        total = job.get("output_size", 0) if job else 0
+        return jsonify({"sent": 0, "total": total, "done": False})
+    return jsonify(prog)
+
+
 @app.route("/api/download_job/<job_id>", methods=["GET"])
 def api_download_job(job_id):
-    job = JOBS.get(job_id)
-    if not job or not os.path.exists(job["out_path"]):
-        return "File not found", 404
+    job = load_job(job_id)
+    out_path = job["out_path"] if job and "out_path" in job else os.path.join(JOBS_DIR, f"out_{job_id}.mp4")
+
+    if (not os.path.exists(out_path)) or os.path.getsize(out_path) < 1024:
+        in_path = job["in_path"] if job and "in_path" in job else os.path.join(JOBS_DIR, f"in_{job_id}.mp4")
+        if os.path.exists(in_path) and os.path.getsize(in_path) >= 1024:
+            out_path = in_path
+        else:
+            return "Output video file not found or empty on server", 404
+
+    raw_name = job.get("download_name", f"xuqingxinnocent_{job_id}.mp4") if job else f"xuqingxinnocent_{job_id}.mp4"
+    dl_name = safe_ascii_filename(raw_name, fallback=f"xuqingxinnocent_{job_id}.mp4")
+
     return send_file(
-        job["out_path"],
+        out_path,
         mimetype="video/mp4",
         as_attachment=True,
-        download_name=job.get("download_name", "xuqingxinnocent_1000x2166_HQ.mp4")
+        download_name=dl_name,
+        conditional=True,
+        max_age=0
     )
 
 
