@@ -300,7 +300,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 </svg>
             </div>
             <p class="upload-title" id="uploadTitle">Select file — click to upload</p>
-            <p class="upload-sub">MP4 — Original Resolution Passthrough (Any px / FPS)</p>
+            <p class="upload-sub">MP4 / MOV / MKV / WebM — Original Resolution Passthrough</p>
         </div>
 
         <div class="file-meta" id="fileMeta">
@@ -407,6 +407,25 @@ function asciiToBytes(str) {
     return out;
 }
 
+// Universal File Slice Reader with FileReader Fallback (fixes Android/iOS WebView NotReadableError on 500MB+ files)
+async function readSliceBufferSafe(file, start, end) {
+    const s = Math.max(0, start);
+    const e = Math.min(file.size, end);
+    if (e <= s) return new ArrayBuffer(0);
+    const blob = file.slice(s, e);
+    try {
+        if (typeof blob.arrayBuffer === 'function') {
+            return await blob.arrayBuffer();
+        }
+    } catch (_) {}
+    return await new Promise((resolve, reject) => {
+        const fr = new FileReader();
+        fr.onload = () => resolve(fr.result);
+        fr.onerror = () => reject(fr.error || new Error("File slice read error"));
+        fr.readAsArrayBuffer(blob);
+    });
+}
+
 const EXACT_AVC1_FTYP_32B = hexToBytes("000000206674797069736f6d0000020069736f6d69736f32617663316d703431");
 const EXACT_MVHD_120B = hexToBytes("000000786d7668640100000000000000000000000000000000000000000003e8ffffffffffffffff0001000001000000000000000000000000010000000000000000000000000000000100000000000000000000000000004000000000000000000000000000000000000000000000000000000000000003");
 const EXACT_COLR_19B = hexToBytes("00000013636f6c726e636c7800010001000100");
@@ -466,7 +485,7 @@ async function detectMp4SpecsFromFile(file) {
             const v = document.createElement('video');
             v.preload = 'metadata';
             const url = URL.createObjectURL(file);
-            const timer = setTimeout(() => { URL.revokeObjectURL(url); resolve({ w: 0, h: 0 }); }, 3500);
+            const timer = setTimeout(() => { URL.revokeObjectURL(url); resolve({ w: 0, h: 0 }); }, 4000);
             v.onloadedmetadata = () => {
                 clearTimeout(timer);
                 const w = v.videoWidth || 0;
@@ -486,8 +505,8 @@ async function detectMp4SpecsFromFile(file) {
     } catch (_) {}
 
     try {
-        const parseSlice = async (blobSlice) => {
-            const ab = await blobSlice.arrayBuffer();
+        const parseSlice = async (startOff, endOff) => {
+            const ab = await readSliceBufferSafe(file, startOff, endOff);
             const bytes = new Uint8Array(ab);
             const view = new DataView(ab);
             const len = bytes.byteLength;
@@ -539,10 +558,10 @@ async function detectMp4SpecsFromFile(file) {
         };
 
         const headSize = Math.min(file.size, 8 * 1024 * 1024);
-        await parseSlice(file.slice(0, headSize));
+        await parseSlice(0, headSize);
         if ((fps === 0 || width === 0) && file.size > headSize) {
             const tailStart = Math.max(0, file.size - 8 * 1024 * 1024);
-            await parseSlice(file.slice(tailStart, file.size));
+            await parseSlice(tailStart, file.size);
         }
     } catch (_) {}
 
@@ -613,7 +632,7 @@ function readBoxType(u8, off) {
     return String.fromCharCode(u8[off], u8[off + 1], u8[off + 2], u8[off + 3]);
 }
 
-// Deep Binary Search fallback if non-standard headers/padding prevent top-level box walk from finding moov/mdat
+// Deep Binary Search fallback that tolerates trailing garbage bytes or slight size mismatches
 async function deepFindBoxInChunk(file, boxFourCC, startOffset, endOffset) {
     const c0 = boxFourCC.charCodeAt(0),
           c1 = boxFourCC.charCodeAt(1),
@@ -624,9 +643,14 @@ async function deepFindBoxInChunk(file, boxFourCC, startOffset, endOffset) {
     let cur = Math.max(0, startOffset);
     const limit = Math.min(fileSize, endOffset);
 
+    const validSubBoxes = {
+        "moov": ["mvhd", "trak", "mvex", "udta", "meta"],
+        "mdat": []
+    };
+
     while (cur < limit) {
         const sliceEnd = Math.min(limit, cur + CHUNK);
-        const ab = await file.slice(cur, sliceEnd).arrayBuffer();
+        const ab = await readSliceBufferSafe(file, cur, sliceEnd);
         const u8 = new Uint8Array(ab);
         const view = new DataView(ab);
 
@@ -634,20 +658,38 @@ async function deepFindBoxInChunk(file, boxFourCC, startOffset, endOffset) {
             if (u8[i] === c0 && u8[i+1] === c1 && u8[i+2] === c2 && u8[i+3] === c3) {
                 const boxStart = cur + i - 4;
                 let sz = view.getUint32(i - 4, false);
+                let hdrLen = 8;
                 if (sz === 1 && i + 12 <= u8.byteLength) {
                     const hi = view.getUint32(i + 4, false);
                     const lo = view.getUint32(i + 8, false);
                     sz = hi * 4294967296 + lo;
+                    hdrLen = 16;
                 } else if (sz === 0) {
                     sz = fileSize - boxStart;
                 }
-                if (sz >= 8 && boxStart + sz <= fileSize) {
-                    return { pos: boxStart, size: sz };
+
+                // If moov, verify child box signature (mvhd/trak) so we never match random video bytes,
+                // and clamp size if file has slight truncation or trailing bytes!
+                if (boxFourCC === "moov" && i + hdrLen + 4 <= u8.byteLength) {
+                    const subTp = readBoxType(u8, i - 4 + hdrLen + 4);
+                    if (validSubBoxes.moov.includes(subTp)) {
+                        const clampedSz = (sz >= 8 && boxStart + sz <= fileSize) ? sz : (fileSize - boxStart);
+                        if (clampedSz >= 32) {
+                            return { pos: boxStart, size: clampedSz };
+                        }
+                    }
+                } else if (boxFourCC === "mdat") {
+                    if (sz >= 8 && boxStart + sz <= fileSize + 64) {
+                        const clampedSz = Math.min(sz, fileSize - boxStart);
+                        if (clampedSz > 1024) {
+                            return { pos: boxStart, size: clampedSz };
+                        }
+                    }
                 }
             }
         }
         if (sliceEnd >= limit) break;
-        cur += CHUNK - 64;
+        cur += CHUNK - 128;
     }
     return null;
 }
@@ -658,75 +700,87 @@ async function locateMoovAndMdatRobust(file) {
     let moovPos = -1, moovSize = 0;
     let mdatPos = -1, mdatSize = 0;
 
-    // 1. Standard Top-Level Box Walk (supports 32-bit and 64-bit extended size)
-    let safetySteps = 0;
-    while (pos + 8 <= fileSize && safetySteps < 10000) {
-        safetySteps++;
-        const hdrAb = await file.slice(pos, Math.min(fileSize, pos + 16)).arrayBuffer();
-        if (hdrAb.byteLength < 8) break;
-        const hdrView = new DataView(hdrAb);
-        const hdrU8 = new Uint8Array(hdrAb);
-        let sz = hdrView.getUint32(0, false);
-        const tp = readBoxType(hdrU8, 4);
-
-        if (sz === 1) {
-            if (hdrAb.byteLength < 16) break;
-            const hi = hdrView.getUint32(8, false);
-            const lo = hdrView.getUint32(12, false);
-            sz = hi * 4294967296 + lo;
-        } else if (sz === 0) {
-            sz = fileSize - pos;
-        }
-
-        // Check if box header is valid ASCII fourCC and size is valid
-        const validFourCC = /^[ -~]{4}$/.test(tp);
-        if (!validFourCC || sz < 8 || pos + sz > fileSize) {
-            break;
-        }
-
-        if (tp === "moov") {
-            moovPos = pos;
-            moovSize = sz;
-        } else if (tp === "mdat" && sz > mdatSize) {
-            mdatPos = pos;
-            mdatSize = sz;
-        }
-        pos += sz;
-    }
-
-    // 2. Deep Fallback Search if top-level walk missed moov or mdat (common in 2K/1440p files with padding/zeroes)
-    const TAIL_SCAN_BYTES = 32 * 1024 * 1024;
-    const HEAD_SCAN_BYTES = 32 * 1024 * 1024;
-
-    if (moovPos === -1) {
-        // Check first 32MB
-        let found = await deepFindBoxInChunk(file, "moov", 0, Math.min(fileSize, HEAD_SCAN_BYTES));
-        // Check last 32MB (where large files usually store moov)
-        if (!found && fileSize > HEAD_SCAN_BYTES) {
-            found = await deepFindBoxInChunk(file, "moov", Math.max(0, fileSize - TAIL_SCAN_BYTES), fileSize);
-        }
-        // Full scan if still not found
-        if (!found && fileSize > HEAD_SCAN_BYTES + TAIL_SCAN_BYTES) {
-            found = await deepFindBoxInChunk(file, "moov", HEAD_SCAN_BYTES, fileSize - TAIL_SCAN_BYTES);
-        }
-        if (found) {
-            moovPos = found.pos;
-            moovSize = found.size;
+    // Check first 16 bytes to detect WebM/MKV (EBML 0x1A45DFA3) or MPEG-TS (0x47)
+    const sigAb = await readSliceBufferSafe(file, 0, Math.min(64, fileSize));
+    const sigU8 = new Uint8Array(sigAb);
+    let isNonMp4Container = false;
+    if (sigU8.byteLength >= 4) {
+        if (sigU8[0] === 0x1A && sigU8[1] === 0x45 && sigU8[2] === 0xDF && sigU8[3] === 0xA3) {
+            isNonMp4Container = true; // MKV / WebM container disguised as .mp4
         }
     }
 
-    if (mdatPos === -1) {
-        let found = await deepFindBoxInChunk(file, "mdat", 0, Math.min(fileSize, HEAD_SCAN_BYTES));
-        if (!found && fileSize > HEAD_SCAN_BYTES) {
-            found = await deepFindBoxInChunk(file, "mdat", HEAD_SCAN_BYTES, fileSize);
+    if (!isNonMp4Container) {
+        // 1. Standard Top-Level Box Walk (supports 32-bit, 64-bit, zero-padding skip)
+        let safetySteps = 0;
+        while (pos + 8 <= fileSize && safetySteps < 15000) {
+            safetySteps++;
+            const hdrAb = await readSliceBufferSafe(file, pos, Math.min(fileSize, pos + 16));
+            if (hdrAb.byteLength < 8) break;
+            const hdrView = new DataView(hdrAb);
+            const hdrU8 = new Uint8Array(hdrAb);
+            let sz = hdrView.getUint32(0, false);
+            const tp = readBoxType(hdrU8, 4);
+
+            // Skip zero padding bytes between boxes
+            if (sz === 0 && hdrU8[4] === 0 && hdrU8[5] === 0 && hdrU8[6] === 0 && hdrU8[7] === 0) {
+                pos += 4;
+                continue;
+            }
+
+            if (sz === 1) {
+                if (hdrAb.byteLength < 16) break;
+                const hi = hdrView.getUint32(8, false);
+                const lo = hdrView.getUint32(12, false);
+                sz = hi * 4294967296 + lo;
+            } else if (sz === 0) {
+                sz = fileSize - pos;
+            }
+
+            const validFourCC = /^[ -~]{4}$/.test(tp);
+            if (!validFourCC || sz < 8) {
+                break;
+            }
+            if (pos + sz > fileSize) {
+                sz = fileSize - pos;
+            }
+
+            if (tp === "moov") {
+                moovPos = pos;
+                moovSize = sz;
+            } else if (tp === "mdat" && sz > mdatSize) {
+                mdatPos = pos;
+                mdatSize = sz;
+            }
+            pos += sz;
         }
-        if (found) {
-            mdatPos = found.pos;
-            mdatSize = found.size;
+
+        // 2. Deep Fallback Search if top-level walk missed moov or mdat
+        const SCAN_WINDOW = 64 * 1024 * 1024; // 64MB head & tail scan
+        if (moovPos === -1) {
+            let found = await deepFindBoxInChunk(file, "moov", 0, Math.min(fileSize, SCAN_WINDOW));
+            if (!found && fileSize > SCAN_WINDOW) {
+                found = await deepFindBoxInChunk(file, "moov", Math.max(0, fileSize - SCAN_WINDOW), fileSize);
+            }
+            if (found) {
+                moovPos = found.pos;
+                moovSize = found.size;
+            }
+        }
+
+        if (mdatPos === -1) {
+            let found = await deepFindBoxInChunk(file, "mdat", 0, Math.min(fileSize, SCAN_WINDOW));
+            if (!found && fileSize > SCAN_WINDOW) {
+                found = await deepFindBoxInChunk(file, "mdat", Math.max(0, fileSize - SCAN_WINDOW), fileSize);
+            }
+            if (found) {
+                mdatPos = found.pos;
+                mdatSize = found.size;
+            }
         }
     }
 
-    return { moovPos, moovSize, mdatPos, mdatSize };
+    return { moovPos, moovSize, mdatPos, mdatSize, isNonMp4Container };
 }
 
 function hasSubBox(u8, fourCC) {
@@ -894,6 +948,36 @@ function shiftStcoInBrowser(buf, start, endIdx, delta) {
     }
 }
 
+// Server-side FFmpeg Zero-Loss Remux + Bypass Fallback when file is MKV/WebM/Fragmented MP4 (no moov/mdat)
+async function processViaServerFallback(file, targetW, targetH, fps) {
+    setStepperState('Reading File (Server Remux)', 28, 2, 'Remuxing container to standard MP4...');
+    const formData = new FormData();
+    formData.append('video', file);
+    formData.append('width', String(targetW));
+    formData.append('height', String(targetH));
+    formData.append('fps', String(fps));
+
+    const resp = await fetch('/api/remux_bypass', {
+        method: 'POST',
+        body: formData
+    });
+
+    if (!resp.ok) {
+        let errMsg = 'Server remux failed';
+        try {
+            const errJson = await resp.json();
+            if (errJson && errJson.error) errMsg = errJson.error;
+        } catch (_) {}
+        throw new Error(errMsg);
+    }
+
+    setStepperState('Converting Video', 68, 3, '');
+    await sleep(180);
+    setStepperState('Applying Bypass', 90, 4, '');
+    const outBlob = await resp.blob();
+    return outBlob;
+}
+
 async function startProcess() {
     if (!selectedFile) {
         document.getElementById('videoInput').click();
@@ -909,94 +993,94 @@ async function startProcess() {
         await sleep(180);
 
         const fileSize = selectedFile.size;
-        const { moovPos, moovSize, mdatPos, mdatSize } = await locateMoovAndMdatRobust(selectedFile);
-
-        // STEP 2: READ (15% -> 45%)
-        setStepperState('Reading File', 15, 2, '');
-        await sleep(220);
-
-        if (moovPos === -1 || mdatPos === -1) {
-            throw new Error("Invalid MP4 file (moov or mdat not found)");
-        }
-
-        const moovAb = await selectedFile.slice(moovPos, moovPos + moovSize).arrayBuffer();
-        const moovBytes = new Uint8Array(moovAb);
-        setStepperState('Reading File', 42, 2, '');
-        await sleep(200);
-
-        // STEP 3: CONVERT (50% -> 82%)
-        // Keep Original Resolution (Passthrough) instead of forcing fixed resolutions
         const targetW = detectedSpecs.width || 1080;
         const targetH = detectedSpecs.height || 1920;
-
-        setStepperState('Converting Video', 65, 3, '');
-        await sleep(250);
-
-        const moovView = new DataView(moovBytes.buffer, moovBytes.byteOffset, moovBytes.byteLength);
-        const moovRootHdr = readBoxHeader(moovBytes, moovView, 0, moovBytes.byteLength);
-        let mpos = moovRootHdr ? moovRootHdr.hdrLen : 8;
-        const mend = moovBytes.byteLength;
-        const newMoovChildrenList = [EXACT_MVHD_120B];
-
-        while (mpos + 8 <= mend) {
-            const mh = readBoxHeader(moovBytes, moovView, mpos, mend);
-            if (!mh) break;
-            const msz = mh.size;
-            const mtp = mh.type;
-            if (mtp !== "mvhd" && mtp !== "udta") {
-                const boxSlice = moovBytes.subarray(mpos, mpos + msz);
-                newMoovChildrenList.push(rebuildBoxInBrowser(boxSlice, false, targetW, targetH));
-            }
-            mpos += msz;
-        }
-
-        // STEP 4: BYPASS (85% -> 100%)
-        setStepperState('Applying Bypass', 88, 4, '');
-        await sleep(220);
-
-        const udtaBox = buildAppleIlstUdta("xuqingxinnocent");
-        newMoovChildrenList.push(udtaBox);
-
-        const newMoovChildren = concatBytes(newMoovChildrenList);
-        const newMoovSize = 8 + newMoovChildren.byteLength;
-        const newMdatPos = EXACT_AVC1_FTYP_32B.byteLength + newMoovSize;
-
-        // Calculate offset delta based on mdat payload start so 32-bit/64-bit mdat header conversion never corrupts stco/co64 offsets
-        const mdatHdrAb = await selectedFile.slice(mdatPos, Math.min(fileSize, mdatPos + 16)).arrayBuffer();
-        const mdatHdrView = new DataView(mdatHdrAb);
-        const origMdatSizeField = mdatHdrAb.byteLength >= 4 ? mdatHdrView.getUint32(0, false) : 0;
-        const origMdatHdrLen = (origMdatSizeField === 1) ? 16 : 8;
-        const mdatPayloadPos = mdatPos + origMdatHdrLen;
-        const mdatPayloadSize = mdatSize - origMdatHdrLen;
-
-        let newMdatHdr;
-        if (mdatPayloadSize + 8 > 0xFFFFFFFF) {
-            newMdatHdr = new Uint8Array(16);
-            const mv = new DataView(newMdatHdr.buffer);
-            mv.setUint32(0, 1, false);
-            newMdatHdr.set(asciiToBytes("mdat"), 4);
-            const total64 = mdatPayloadSize + 16;
-            mv.setUint32(8, Math.floor(total64 / 4294967296) >>> 0, false);
-            mv.setUint32(12, (total64 % 4294967296) >>> 0, false);
-        } else {
-            newMdatHdr = concatBytes([packU32BE(mdatPayloadSize + 8), asciiToBytes("mdat")]);
-        }
-
-        const newMdatPayloadPos = newMdatPos + newMdatHdr.byteLength;
-        const delta = newMdatPayloadPos - mdatPayloadPos;
-
-        if (delta !== 0) {
-            shiftStcoInBrowser(newMoovChildren, 0, newMoovChildren.byteLength, delta);
-        }
-
-        const newMoovBox = concatBytes([packU32BE(newMoovSize), asciiToBytes("moov"), newMoovChildren]);
-
-        // Zero-Copy Blob assembly: combines 32B ftyp + rebuilt moov + clean mdat header + direct disk slice of mdat payload!
-        const mdatPayloadSlice = selectedFile.slice(mdatPayloadPos, mdatPayloadPos + mdatPayloadSize);
-        const finalBlob = new Blob([EXACT_AVC1_FTYP_32B, newMoovBox, newMdatHdr, mdatPayloadSlice], { type: 'video/mp4' });
-
+        const targetFps = detectedSpecs.fps || 60;
         const baseName = (selectedFile.name || "video").replace(/\.[^/.]+$/, "");
-        const outFilename = `${baseName}_xuqingxinnocent_${targetW}x${targetH}_${detectedSpecs.fps || 60}fps.mp4`;
+        const outFilename = `${baseName}_xuqingxinnocent_${targetW}x${targetH}_${targetFps}fps.mp4`;
+
+        const { moovPos, moovSize, mdatPos, mdatSize, isNonMp4Container } = await locateMoovAndMdatRobust(selectedFile);
+
+        let finalBlob = null;
+
+        // If the 2560x1440 file is actually a WebM/MKV/Fragmented stream (which has no standard moov/mdat),
+        // automatically fall back to Server FFmpeg stream-copy remux + exact binary bypass!
+        if (moovPos === -1 || mdatPos === -1 || isNonMp4Container) {
+            finalBlob = await processViaServerFallback(selectedFile, targetW, targetH, targetFps);
+        } else {
+            // STEP 2: READ (15% -> 45%)
+            setStepperState('Reading File', 15, 2, '');
+            await sleep(220);
+
+            const moovAb = await readSliceBufferSafe(selectedFile, moovPos, moovPos + moovSize);
+            const moovBytes = new Uint8Array(moovAb);
+            setStepperState('Reading File', 42, 2, '');
+            await sleep(200);
+
+            // STEP 3: CONVERT (50% -> 82%)
+            setStepperState('Converting Video', 65, 3, '');
+            await sleep(250);
+
+            const moovView = new DataView(moovBytes.buffer, moovBytes.byteOffset, moovBytes.byteLength);
+            const moovRootHdr = readBoxHeader(moovBytes, moovView, 0, moovBytes.byteLength);
+            let mpos = moovRootHdr ? moovRootHdr.hdrLen : 8;
+            const mend = moovBytes.byteLength;
+            const newMoovChildrenList = [EXACT_MVHD_120B];
+
+            while (mpos + 8 <= mend) {
+                const mh = readBoxHeader(moovBytes, moovView, mpos, mend);
+                if (!mh) break;
+                const msz = mh.size;
+                const mtp = mh.type;
+                if (mtp !== "mvhd" && mtp !== "udta") {
+                    const boxSlice = moovBytes.subarray(mpos, mpos + msz);
+                    newMoovChildrenList.push(rebuildBoxInBrowser(boxSlice, false, targetW, targetH));
+                }
+                mpos += msz;
+            }
+
+            // STEP 4: BYPASS (85% -> 100%)
+            setStepperState('Applying Bypass', 88, 4, '');
+            await sleep(220);
+
+            const udtaBox = buildAppleIlstUdta("xuqingxinnocent");
+            newMoovChildrenList.push(udtaBox);
+
+            const newMoovChildren = concatBytes(newMoovChildrenList);
+            const newMoovSize = 8 + newMoovChildren.byteLength;
+            const newMdatPos = EXACT_AVC1_FTYP_32B.byteLength + newMoovSize;
+
+            const mdatHdrAb = await readSliceBufferSafe(selectedFile, mdatPos, Math.min(fileSize, mdatPos + 16));
+            const mdatHdrView = new DataView(mdatHdrAb);
+            const origMdatSizeField = mdatHdrAb.byteLength >= 4 ? mdatHdrView.getUint32(0, false) : 0;
+            const origMdatHdrLen = (origMdatSizeField === 1) ? 16 : 8;
+            const mdatPayloadPos = mdatPos + origMdatHdrLen;
+            const mdatPayloadSize = mdatSize - origMdatHdrLen;
+
+            let newMdatHdr;
+            if (mdatPayloadSize + 8 > 0xFFFFFFFF) {
+                newMdatHdr = new Uint8Array(16);
+                const mv = new DataView(newMdatHdr.buffer);
+                mv.setUint32(0, 1, false);
+                newMdatHdr.set(asciiToBytes("mdat"), 4);
+                const total64 = mdatPayloadSize + 16;
+                mv.setUint32(8, Math.floor(total64 / 4294967296) >>> 0, false);
+                mv.setUint32(12, (total64 % 4294967296) >>> 0, false);
+            } else {
+                newMdatHdr = concatBytes([packU32BE(mdatPayloadSize + 8), asciiToBytes("mdat")]);
+            }
+
+            const newMdatPayloadPos = newMdatPos + newMdatHdr.byteLength;
+            const delta = newMdatPayloadPos - mdatPayloadPos;
+
+            if (delta !== 0) {
+                shiftStcoInBrowser(newMoovChildren, 0, newMoovChildren.byteLength, delta);
+            }
+
+            const newMoovBox = concatBytes([packU32BE(newMoovSize), asciiToBytes("moov"), newMoovChildren]);
+            const mdatPayloadSlice = selectedFile.slice(mdatPayloadPos, mdatPayloadPos + mdatPayloadSize);
+            finalBlob = new Blob([EXACT_AVC1_FTYP_32B, newMoovBox, newMdatHdr, mdatPayloadSlice], { type: 'video/mp4' });
+        }
 
         if (lastOutputBlobUrl) {
             try { URL.revokeObjectURL(lastOutputBlobUrl); } catch (_) {}
@@ -1023,9 +1107,295 @@ async function startProcess() {
 </html>
 """
 
+# Exact Binary Bypass Constants in Python for Server-Side Fallback
+EXACT_AVC1_FTYP_32B = binascii.unhexlify("000000206674797069736f6d0000020069736f6d69736f32617663316d703431")
+EXACT_MVHD_120B = binascii.unhexlify("000000786d7668640100000000000000000000000000000000000000000003e8ffffffffffffffff0001000001000000000000000000000000010000000000000000000000000000000100000000000000000000000000004000000000000000000000000000000000000000000000000000000000000003")
+EXACT_COLR_19B = binascii.unhexlify("00000013636f6c726e636c7800010001000100")
+EXACT_PASP_16B = binascii.unhexlify("00000010706173700000000100000001")
+EXACT_BTRT_20B = binascii.unhexlify("00000014627472740000000001312d0001312d00")
+
+
+def build_apple_ilst_udta_py(method_name="xuqingxinnocent"):
+    clean_name = (method_name or "xuqingxinnocent").strip()
+    ver_name = clean_name if clean_name.endswith("-v2.0.0") else f"{clean_name}-v2.0.0"
+    clean_bytes = clean_name.encode("utf-8")
+    ver_bytes = ver_name.encode("utf-8")
+
+    items = [
+        (binascii.unhexlify("a9415254"), clean_bytes),
+        (binascii.unhexlify("a96e616d"), clean_bytes),
+        (binascii.unhexlify("a9746f6f"), ver_bytes),
+        (binascii.unhexlify("a9656e63"), ver_bytes),
+        (binascii.unhexlify("a9777274"), clean_bytes),
+        (binascii.unhexlify("a9636d74"), ver_bytes),
+        (b"cprt", ver_bytes),
+    ]
+
+    hdlr_box = binascii.unhexlify("0000002168646c7200000000000000006d6469726170706c000000000000000000")
+    ilst_children = []
+    for tag4, val_bytes in items:
+        data_box = struct.pack(">I4sII", 16 + len(val_bytes), b"data", 1, 0) + val_bytes
+        item_box = struct.pack(">I4s", 8 + len(data_box), tag4) + data_box
+        ilst_children.append(item_box)
+
+    ilst_payload = b"".join(ilst_children)
+    ilst_box = struct.pack(">I4s", 8 + len(ilst_payload), b"ilst") + ilst_payload
+    meta_payload = b"\x00\x00\x00\x00" + hdlr_box + ilst_box
+    meta_box = struct.pack(">I4s", 8 + len(meta_payload), b"meta") + meta_payload
+    udta_box = struct.pack(">I4s", 8 + len(meta_box), b"udta") + meta_box
+    return udta_box
+
+
+def rebuild_box_py(box_data, is_video_trak, target_w, target_h):
+    if len(box_data) < 8:
+        return box_data
+    sz, btype = struct.unpack(">I4s", box_data[:8])
+    hdr_len = 8
+    if sz == 1 and len(box_data) >= 16:
+        sz = struct.unpack(">Q", box_data[8:16])[0]
+        hdr_len = 16
+
+    if btype == b"trak":
+        is_video_trak = (b"vmhd" in box_data)
+
+    if btype == b"tkhd":
+        out = bytearray(box_data)
+        ver = out[hdr_len]
+        w_off = (hdr_len - 8) + (96 if ver == 1 else 84)
+        if w_off + 8 <= len(out):
+            if is_video_trak:
+                struct.pack_into(">II", out, w_off, (target_w << 16) & 0xFFFFFFFF, (target_h << 16) & 0xFFFFFFFF)
+            else:
+                struct.pack_into(">II", out, w_off, 0, 0)
+        return bytes(out)
+
+    if btype == b"stsd" and is_video_trak and len(box_data) >= 102:
+        entry_type = box_data[20:24]
+        if entry_type == b"avc1":
+            avcc_box = None
+            btrt_box = EXACT_BTRT_20B
+            sub_pos = 16 + 86
+            sub_end = len(box_data)
+            while sub_pos + 8 <= sub_end:
+                ssz, stp = struct.unpack(">I4s", box_data[sub_pos:sub_pos + 8])
+                if ssz < 8 or sub_pos + ssz > sub_end:
+                    break
+                if stp == b"avcC":
+                    avcc_box = box_data[sub_pos:sub_pos + ssz]
+                elif stp == b"btrt" and ssz == 20:
+                    btrt_box = box_data[sub_pos:sub_pos + ssz]
+                sub_pos += ssz
+            if avcc_box:
+                avc1_hdr = bytearray(box_data[16:16 + 86])
+                struct.pack_into(">HH", avc1_hdr, 32, target_w, target_h)
+                avc1_hdr[50:82] = b"\x00" * 32
+                avc1_children = avcc_box + EXACT_COLR_19B + EXACT_PASP_16B + btrt_box
+                avc1_size = 86 + len(avc1_children)
+                struct.pack_into(">I", avc1_hdr, 0, avc1_size)
+                avc1_box = bytes(avc1_hdr) + avc1_children
+                return struct.pack(">I4sII", 16 + len(avc1_box), b"stsd", 0, 1) + avc1_box
+        elif entry_type in (b"hvc1", b"hev1"):
+            out = bytearray(box_data)
+            if len(out) >= 16 + 36:
+                struct.pack_into(">HH", out, 16 + 32, target_w, target_h)
+            return bytes(out)
+
+    if btype not in (b"trak", b"mdia", b"minf", b"stbl"):
+        return box_data
+
+    cpos = hdr_len
+    cend = len(box_data)
+    children = []
+    while cpos + 8 <= cend:
+        csz, ctp = struct.unpack(">I4s", box_data[cpos:cpos + 8])
+        if csz == 1 and cpos + 16 <= cend:
+            csz = struct.unpack(">Q", box_data[cpos + 8:cpos + 16])[0]
+        elif csz == 0:
+            csz = cend - cpos
+        if csz < 8 or cpos + csz > cend:
+            break
+        children.append(rebuild_box_py(box_data[cpos:cpos + csz], is_video_trak, target_w, target_h))
+        cpos += csz
+
+    children_bytes = b"".join(children)
+    return struct.pack(">I4s", 8 + len(children_bytes), btype) + children_bytes
+
+
+def shift_stco_py(buf, start, end_idx, delta):
+    cur = start
+    containers = (b"trak", b"mdia", b"minf", b"stbl", b"edts", b"dinf")
+    while cur + 8 <= end_idx:
+        bsz, btp = struct.unpack_from(">I4s", buf, cur)
+        hdr_len = 8
+        if bsz == 1 and cur + 16 <= end_idx:
+            bsz = struct.unpack_from(">Q", buf, cur + 8)[0]
+            hdr_len = 16
+        elif bsz == 0:
+            bsz = end_idx - cur
+        if bsz < hdr_len or cur + bsz > end_idx:
+            break
+        if btp in containers:
+            shift_stco_py(buf, cur + hdr_len, cur + bsz, delta)
+        elif btp == b"stco":
+            cnt = struct.unpack_from(">I", buf, cur + 12)[0]
+            for k in range(cnt):
+                op = cur + 16 + k * 4
+                if op + 4 <= cur + bsz:
+                    old_v = struct.unpack_from(">I", buf, op)[0]
+                    new_v = max(0, old_v + delta)
+                    struct.pack_into(">I", buf, op, new_v & 0xFFFFFFFF)
+        elif btp == b"co64":
+            cnt = struct.unpack_from(">I", buf, cur + 12)[0]
+            for k in range(cnt):
+                op = cur + 16 + k * 8
+                if op + 8 <= cur + bsz:
+                    old_v = struct.unpack_from(">Q", buf, op)[0]
+                    new_v = max(0, old_v + delta)
+                    struct.pack_into(">Q", buf, op, new_v)
+        cur += bsz
+
+
+def apply_bypass_to_mp4_file(in_mp4_path, out_mp4_path, target_w, target_h):
+    file_size = os.path.getsize(in_mp4_path)
+    moov_pos, moov_size = -1, 0
+    mdat_pos, mdat_size, mdat_hdr_len = -1, 0, 8
+
+    with open(in_mp4_path, "rb") as f:
+        pos = 0
+        while pos + 8 <= file_size:
+            f.seek(pos)
+            hdr = f.read(16)
+            if len(hdr) < 8:
+                break
+            sz, tp = struct.unpack(">I4s", hdr[:8])
+            hdr_len = 8
+            if sz == 1 and len(hdr) >= 16:
+                sz = struct.unpack(">Q", hdr[8:16])[0]
+                hdr_len = 16
+            elif sz == 0:
+                sz = file_size - pos
+            if sz < hdr_len or pos + sz > file_size:
+                break
+            if tp == b"moov":
+                moov_pos, moov_size = pos, sz
+            elif tp == b"mdat" and sz > mdat_size:
+                mdat_pos, mdat_size, mdat_hdr_len = pos, sz, hdr_len
+            pos += sz
+
+        if moov_pos == -1 or mdat_pos == -1:
+            raise ValueError("Remuxed file missing moov or mdat")
+
+        f.seek(moov_pos)
+        moov_bytes = f.read(moov_size)
+
+    moov_hdr_len = 16 if struct.unpack(">I", moov_bytes[:4])[0] == 1 else 8
+    mpos = moov_hdr_len
+    mend = len(moov_bytes)
+    new_children = [EXACT_MVHD_120B]
+
+    while mpos + 8 <= mend:
+        msz, mtp = struct.unpack(">I4s", moov_bytes[mpos:mpos + 8])
+        if msz == 1 and mpos + 16 <= mend:
+            msz = struct.unpack(">Q", moov_bytes[mpos + 8:mpos + 16])[0]
+        elif msz == 0:
+            msz = mend - mpos
+        if msz < 8 or mpos + msz > mend:
+            break
+        if mtp not in (b"mvhd", b"udta"):
+            new_children.append(rebuild_box_py(moov_bytes[mpos:mpos + msz], False, target_w, target_h))
+        mpos += msz
+
+    new_children.append(build_apple_ilst_udta_py("xuqingxinnocent"))
+    children_buf = bytearray(b"".join(new_children))
+
+    new_moov_size = 8 + len(children_buf)
+    new_mdat_pos = len(EXACT_AVC1_FTYP_32B) + new_moov_size
+
+    mdat_payload_pos = mdat_pos + mdat_hdr_len
+    mdat_payload_size = mdat_size - mdat_hdr_len
+
+    if mdat_payload_size + 8 > 0xFFFFFFFF:
+        new_mdat_hdr = struct.pack(">I4sQ", 1, b"mdat", mdat_payload_size + 16)
+    else:
+        new_mdat_hdr = struct.pack(">I4s", mdat_payload_size + 8, b"mdat")
+
+    new_mdat_payload_pos = new_mdat_pos + len(new_mdat_hdr)
+    delta = new_mdat_payload_pos - mdat_payload_pos
+
+    if delta != 0:
+        shift_stco_py(children_buf, 0, len(children_buf), delta)
+
+    new_moov_box = struct.pack(">I4s", new_moov_size, b"moov") + bytes(children_buf)
+
+    with open(in_mp4_path, "rb") as fin, open(out_mp4_path, "wb") as fout:
+        fout.write(EXACT_AVC1_FTYP_32B)
+        fout.write(new_moov_box)
+        fout.write(new_mdat_hdr)
+        fin.seek(mdat_payload_pos)
+        remaining = mdat_payload_size
+        while remaining > 0:
+            chunk = fin.read(min(8 * 1024 * 1024, remaining))
+            if not chunk:
+                break
+            fout.write(chunk)
+            remaining -= len(chunk)
+
+
 @app.route("/", methods=["GET"])
 def index():
     return render_template_string(HTML_TEMPLATE)
+
+
+@app.route("/api/remux_bypass", methods=["POST"])
+def api_remux_bypass():
+    if "video" not in request.files:
+        return jsonify({"error": "No video file uploaded"}), 400
+
+    vfile = request.files["video"]
+    target_w = int(request.form.get("width", 1080) or 1080)
+    target_h = int(request.form.get("height", 1920) or 1920)
+
+    job_id = str(uuid.uuid4())
+    job_dir = os.path.join(JOBS_DIR, job_id)
+    os.makedirs(job_dir, exist_ok=True)
+
+    in_path = os.path.join(job_dir, "input_video")
+    remux_path = os.path.join(job_dir, "remuxed.mp4")
+    out_path = os.path.join(job_dir, "bypassed.mp4")
+
+    try:
+        vfile.save(in_path)
+
+        # 1. Try lossless stream-copy remux first (0% quality loss, converts MKV/WebM/fMP4 -> standard MP4 with moov/mdat)
+        cmd_copy = [
+            "ffmpeg", "-y", "-i", in_path,
+            "-map", "0:v:0", "-map", "0:a?",
+            "-c", "copy",
+            "-movflags", "+faststart",
+            remux_path
+        ]
+        res = subprocess.run(cmd_copy, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+        # 2. If input video codec is VP9/AV1 inside WebM that cannot be copied directly into standard avc1/hvc1 MP4,
+        # transcode at near-lossless CRF 16 while preserving original resolution
+        if res.returncode != 0 or not os.path.exists(remux_path) or os.path.getsize(remux_path) < 1024:
+            cmd_hq = [
+                "ffmpeg", "-y", "-i", in_path,
+                "-map", "0:v:0", "-map", "0:a?",
+                "-c:v", "libx264", "-preset", "superfast", "-crf", "16",
+                "-pix_fmt", "yuv420p",
+                "-c:a", "aac", "-b:a", "192k",
+                "-movflags", "+faststart",
+                remux_path
+            ]
+            res2 = subprocess.run(cmd_hq, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            if res2.returncode != 0:
+                return jsonify({"error": "FFmpeg remux failed: " + res2.stderr.decode("utf-8", errors="ignore")[-300:]}), 500
+
+        apply_bypass_to_mp4_file(remux_path, out_path, target_w, target_h)
+        return send_file(out_path, mimetype="video/mp4", as_attachment=True, download_name="bypassed.mp4")
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 if __name__ == "__main__":
