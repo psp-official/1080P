@@ -16,7 +16,8 @@ app = Flask(__name__)
 JOBS_DIR = "/tmp/test_encoder_jobs"
 os.makedirs(JOBS_DIR, exist_ok=True)
 
-JOBS = {}
+# Job status tracker for live logs
+JOB_LOGS = {}
 
 HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="en">
@@ -69,7 +70,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             border-color: rgba(255, 255, 255, 0.35);
         }
         .upload-top {
-            padding: 38px 24px 34px;
+            padding: 34px 24px 30px;
             text-align: center;
             cursor: pointer;
             user-select: none;
@@ -78,9 +79,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             display: none;
         }
         .icon-box {
-            width: 68px;
-            height: 68px;
-            margin: 0 auto 22px;
+            width: 64px;
+            height: 64px;
+            margin: 0 auto 18px;
             border-radius: 18px;
             background: #161618;
             border: 1px solid rgba(255, 255, 255, 0.08);
@@ -90,8 +91,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
         }
         .icon-box svg {
-            width: 28px;
-            height: 28px;
+            width: 26px;
+            height: 26px;
             stroke: #d4d4d8;
             stroke-width: 2.1;
             fill: none;
@@ -99,32 +100,62 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             stroke-linejoin: round;
         }
         .upload-title {
-            font-size: 18px;
+            font-size: 17px;
             font-weight: 700;
             color: #f4f4f6;
-            margin: 0 0 10px;
+            margin: 0 0 8px;
             letter-spacing: -0.01em;
         }
         .upload-sub {
-            font-size: 14px;
+            font-size: 13.5px;
             font-weight: 500;
             color: var(--text-dim);
             margin: 0;
+        }
+
+        /* Mode Selector Section */
+        .mode-section {
+            border-top: 1px solid rgba(255, 255, 255, 0.07);
+            padding: 18px 22px;
+            background: rgba(0, 0, 0, 0.2);
+        }
+        .mode-label {
+            font-size: 12.5px;
+            font-weight: 600;
+            color: var(--text-dim);
+            margin-bottom: 10px;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+        .mode-select {
+            width: 100%;
+            padding: 14px 16px;
+            background: #161618;
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            border-radius: 14px;
+            color: #ffffff;
+            font-size: 14.5px;
+            font-weight: 600;
+            outline: none;
+            cursor: pointer;
+            transition: border-color 0.2s ease;
+        }
+        .mode-select:focus {
+            border-color: #00e676;
         }
 
         /* File Metadata Section (Resolution, FrameRate, Size) */
         .file-meta {
             display: none;
             border-top: 1px solid rgba(255, 255, 255, 0.07);
-            padding: 24px 26px;
+            padding: 20px 24px;
             background: rgba(255, 255, 255, 0.01);
         }
         .meta-row {
-            font-size: 16px;
+            font-size: 15px;
             line-height: 1.5;
-            margin-bottom: 14px;
+            margin-bottom: 10px;
             color: #d4d4d8;
-            letter-spacing: 0.01em;
         }
         .meta-row:last-child {
             margin-bottom: 0;
@@ -161,13 +192,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             transform: none;
         }
 
-        /* 4-Step Progress Card (LOAD — READ — CONVERT — BYPASS) */
+        /* 4-Step Progress Card */
         .status-card {
             display: none;
             background: var(--card-bg);
             border: 1px solid var(--card-border);
             border-radius: 24px;
-            padding: 24px 22px 22px;
+            padding: 24px 22px 20px;
             box-shadow: 0 16px 40px rgba(0, 0, 0, 0.65);
             margin-bottom: 18px;
         }
@@ -175,7 +206,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             display: flex;
             align-items: center;
             justify-content: space-between;
-            margin-bottom: 24px;
+            margin-bottom: 22px;
         }
         .status-left {
             display: flex;
@@ -215,6 +246,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             justify-content: space-between;
             position: relative;
             padding: 0 4px;
+            margin-bottom: 16px;
         }
         .step-item {
             display: flex;
@@ -263,27 +295,36 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         .step-line.done {
             background: #6b6b70;
         }
-        .step-line.active::after {
-            content: "✦";
-            position: absolute;
-            top: -8px;
-            left: 50%;
-            transform: translateX(-50%);
-            font-size: 12px;
-            color: #7c7c82;
-            animation: moveStar 1.6s infinite linear;
-        }
-        @keyframes moveStar {
-            0% { left: 15%; opacity: 0.3; }
-            50% { left: 55%; opacity: 1; }
-            100% { left: 85%; opacity: 0.3; }
-        }
 
         .status-subdetail {
-            margin-top: 14px;
-            font-size: 12.5px;
+            font-size: 12px;
             color: var(--text-dim);
             text-align: center;
+            margin-bottom: 14px;
+            word-break: break-all;
+        }
+
+        /* Live Terminal Logs Drawer */
+        .log-container {
+            background: #000000;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 12px;
+            padding: 12px;
+            max-height: 140px;
+            overflow-y: auto;
+            font-family: 'SF Mono', Monaco, Consolas, monospace;
+            font-size: 11px;
+            color: #00e676;
+            text-align: left;
+            line-height: 1.4;
+            display: none;
+        }
+        .log-container.visible {
+            display: block;
+        }
+        .log-line {
+            margin-bottom: 3px;
+            white-space: pre-wrap;
             word-break: break-all;
         }
     </style>
@@ -300,7 +341,16 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 </svg>
             </div>
             <p class="upload-title" id="uploadTitle">Select file — click to upload</p>
-            <p class="upload-sub">Auto 1080p Downscale Encoding + HQ Bypass</p>
+            <p class="upload-sub" id="uploadSub">Choose processing mode below</p>
+        </div>
+
+        <div class="mode-section">
+            <div class="mode-label">Select Processing Mode</div>
+            <select id="modeSelect" class="mode-select">
+                <option value="downscale_4k">4K, 2K Encoding Downscale + Bypass</option>
+                <option value="passthrough_1080p">1080P + Bypass (No Downscale)</option>
+                <option value="all_bypass">All Video + Bypass (Smart Stream Copy)</option>
+            </select>
         </div>
 
         <div class="file-meta" id="fileMeta">
@@ -316,7 +366,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         <div class="status-top">
             <div class="status-left">
                 <span class="status-dot active" id="statusDot"></span>
-                <span id="stageText">Reading File</span>
+                <span id="stageText">Processing File</span>
             </div>
             <div class="status-pct" id="pctText">0%</div>
         </div>
@@ -343,7 +393,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             </div>
         </div>
 
-        <div class="status-subdetail" id="detailMeta"></div>
+        <div class="status-subdetail" id="detailMeta">Initializing encoder...</div>
+
+        <!-- Live Terminal Log Stream -->
+        <div class="log-container" id="logContainer">
+            <div class="log-line">[SYSTEM] Ready for video stream processing...</div>
+        </div>
     </div>
 </div>
 
@@ -351,19 +406,14 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 let selectedFile = null;
 let detectedSpecs = { width: 1080, height: 1920, fps: 30 };
 let lastOutputBlobUrl = null;
+let logPollInterval = null;
 
 const videoInput = document.getElementById('videoInput');
 const dropZone = document.getElementById('dropZone');
+const modeSelect = document.getElementById('modeSelect');
 
 videoInput.addEventListener('change', (e) => {
     if (e.target.files && e.target.files[0]) selectFile(e.target.files[0]);
-});
-dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('dragover'); });
-dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
-dropZone.addEventListener('drop', (e) => {
-    e.preventDefault();
-    dropZone.classList.remove('dragover');
-    if (e.dataTransfer.files && e.dataTransfer.files[0]) selectFile(e.dataTransfer.files[0]);
 });
 
 function formatBytesMB(bytes) {
@@ -371,9 +421,7 @@ function formatBytesMB(bytes) {
     return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
 }
 
-function sleep(ms) {
-    return new Promise(r => setTimeout(r, ms));
-}
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 async function detectMp4SpecsFromFile(file) {
     let width = 1080, height = 1920, fps = 30;
@@ -432,24 +480,26 @@ function setStepperState(stageTitle, pct, stepIdx, detailText) {
     steps.forEach((id, i) => {
         const el = document.getElementById(id);
         el.classList.remove('active', 'done');
-        const idx = i + 1;
-        if (idx < stepIdx || stepIdx === 5) {
-            el.classList.add('done');
-        } else if (idx === stepIdx) {
-            el.classList.add('active');
-        }
+        if (i + 1 < stepIdx || stepIdx === 5) el.classList.add('done');
+        else if (i + 1 === stepIdx) el.classList.add('active');
     });
 
     lines.forEach((id, i) => {
         const el = document.getElementById(id);
         el.classList.remove('active', 'done');
-        const idx = i + 1;
-        if (idx < stepIdx || stepIdx === 5) {
-            el.classList.add('done');
-        } else if (idx === stepIdx - 1) {
-            el.classList.add('active');
-        }
+        if (i + 1 < stepIdx || stepIdx === 5) el.classList.add('done');
+        else if (i + 1 === stepIdx - 1) el.classList.add('active');
     });
+}
+
+function appendLog(text) {
+    const logBox = document.getElementById('logContainer');
+    logBox.classList.add('visible');
+    const line = document.createElement('div');
+    line.className = 'log-line';
+    line.textContent = text;
+    logBox.appendChild(line);
+    logBox.scrollTop = logBox.scrollHeight;
 }
 
 async function startProcess() {
@@ -460,19 +510,21 @@ async function startProcess() {
 
     const startBtn = document.getElementById('startBtn');
     startBtn.disabled = true;
+    document.getElementById('logContainer').innerHTML = '';
+
+    const selectedMode = modeSelect.value;
+    const formData = new FormData();
+    formData.append('video', selectedFile);
+    formData.append('mode', selectedMode);
+    formData.append('width', String(detectedSpecs.width));
+    formData.append('height', String(detectedSpecs.height));
+
+    setStepperState('Loading File', 10, 1, 'Initializing job stream...');
+    appendLog(`[INFO] Selected mode: ${selectedMode}`);
+    appendLog(`[INFO] Input resolution: ${detectedSpecs.width}x${detectedSpecs.height}`);
 
     try {
-        setStepperState('Loading File', 10, 1, 'Uploading file to server for downscale...');
-        await sleep(200);
-
-        const formData = new FormData();
-        formData.append('video', selectedFile);
-        formData.append('width', String(detectedSpecs.width));
-        formData.append('height', String(detectedSpecs.height));
-
-        setStepperState('Converting & Downscaling', 45, 3, 'Encoding 4K/2K to 1080p (HQ CRF 16) + Bypass...');
-        
-        const resp = await fetch('/api/downscale_bypass', {
+        const resp = await fetch('/api/process_video', {
             method: 'POST',
             body: formData
         });
@@ -486,29 +538,65 @@ async function startProcess() {
             throw new Error(errMsg);
         }
 
-        setStepperState('Applying Bypass', 90, 4, 'Finalizing stream...');
-        const outBlob = await resp.blob();
+        const data = await resp.json();
+        const jobId = data.job_id;
 
-        const baseName = (selectedFile.name || "video").replace(/\.[^/.]+$/, "");
-        const outFilename = `${baseName}_downscale_bypassed.mp4`;
+        // Start polling logs and progress
+        setStepperState('Converting & Downscaling', 35, 3, 'Processing video stream...');
+        
+        logPollInterval = setInterval(async () => {
+            try {
+                const lResp = await fetch(`/api/job_status/${jobId}`);
+                if (lResp.ok) {
+                    const lData = await lResp.json();
+                    if (lData.logs && lData.logs.length > 0) {
+                        const currentLines = document.getElementById('logContainer').children.length;
+                        for (let k = currentLines; k < lData.logs.length; k++) {
+                            appendLog(lData.logs[k]);
+                        }
+                    }
+                    if (lData.status === 'completed') {
+                        clearInterval(logPollInterval);
+                        setStepperState('Applying Bypass', 90, 4, 'Finalizing stream...');
+                        await sleep(300);
+                        
+                        // Trigger download
+                        const dResp = await fetch(`/api/download/${jobId}`);
+                        if (dResp.ok) {
+                            const blob = await dResp.blob();
+                            const baseName = (selectedFile.name || "video").replace(/\.[^/.]+$/, "");
+                            const outFilename = `${baseName}_${selectedMode}_bypassed.mp4`;
 
-        if (lastOutputBlobUrl) {
-            try { URL.revokeObjectURL(lastOutputBlobUrl); } catch (_) {}
-        }
-        lastOutputBlobUrl = URL.createObjectURL(outBlob);
+                            if (lastOutputBlobUrl) URL.revokeObjectURL(lastOutputBlobUrl);
+                            lastOutputBlobUrl = URL.createObjectURL(blob);
 
-        const a = document.createElement('a');
-        a.style.display = 'none';
-        a.href = lastOutputBlobUrl;
-        a.download = outFilename;
-        document.body.appendChild(a);
-        a.click();
-        setTimeout(() => a.remove(), 3000);
+                            const a = document.createElement('a');
+                            a.style.display = 'none';
+                            a.href = lastOutputBlobUrl;
+                            a.download = outFilename;
+                            document.body.appendChild(a);
+                            a.click();
+                            setTimeout(() => a.remove(), 3000);
 
-        setStepperState('Completed', 100, 5, outFilename);
-        startBtn.disabled = false;
+                            setStepperState('Completed', 100, 5, outFilename);
+                            startBtn.disabled = false;
+                        } else {
+                            throw new Error("Failed to download processed file");
+                        }
+                    } else if (lData.status === 'error') {
+                        clearInterval(logPollInterval);
+                        throw new Error(lData.error || "Processing failed on server");
+                    }
+                }
+            } catch (err) {
+                // Ignore transient polling network errors
+            }
+        }, 800);
+
     } catch (err) {
+        if (logPollInterval) clearInterval(logPollInterval);
         setStepperState('Error', 0, 1, err.message || String(err));
+        appendLog(`[ERROR] ${err.message}`);
         startBtn.disabled = false;
     }
 }
@@ -548,7 +636,7 @@ def build_apple_ilst_udta_py(method_name="xuqingxinnocent"):
 
     ilst_payload = b"".join(ilst_children)
     ilst_box = struct.pack(">I4s", 8 + len(ilst_payload), b"ilst") + ilst_payload
-    meta_payload = b"\x00\x00\x00\x00" + hdlr_box + ilst_box
+    meta_payload = b"    " + hdlr_box + ilst_box
     meta_box = struct.pack(">I4s", 8 + len(meta_payload), b"meta") + meta_payload
     udta_box = struct.pack(">I4s", 8 + len(meta_box), b"udta") + meta_box
     return udta_box
@@ -575,7 +663,7 @@ def calculate_target_resolution_py(w, h):
         target_h = round((h / w) * target_w)
         if target_h > 1920:
             target_h = 1920
-            target_w = round((w / h) * target_h)
+            target_w = round((w / h) * target_w)
 
     target_w = target_w if target_w % 2 == 0 else target_w - 1
     target_h = target_h if target_h % 2 == 0 else target_h - 1
@@ -623,7 +711,7 @@ def rebuild_box_py(box_data, is_video_trak, target_w, target_h):
             if avcc_box:
                 avc1_hdr = bytearray(box_data[16:16 + 86])
                 struct.pack_into(">HH", avc1_hdr, 32, target_w, target_h)
-                avc1_hdr[50:82] = b"\x00" * 32
+                avc1_hdr[50:82] = b" " * 32
                 avc1_children = avcc_box + EXACT_COLR_19B + EXACT_PASP_16B + btrt_box
                 avc1_size = 86 + len(avc1_children)
                 struct.pack_into(">I", avc1_hdr, 0, avc1_size)
@@ -777,52 +865,154 @@ def apply_bypass_to_mp4_file(in_mp4_path, out_mp4_path, target_w, target_h):
 def index():
     return render_template_string(HTML_TEMPLATE)
 
-@app.route("/api/downscale_bypass", methods=["POST"])
-def api_downscale_bypass():
+def background_process_job(job_id, in_path, processed_path, out_path, mode, orig_w, orig_h):
+    try:
+        def log(msg):
+            print(msg)
+            if job_id in JOBS:
+                JOBS[job_id]["logs"].append(msg)
+
+        log(f"[INFO] Starting job {job_id} with mode: {mode}")
+        log(f"[INFO] Input specs: width={orig_w}, height={orig_h}")
+
+        target_w, target_h = orig_w, orig_h
+
+        if mode == "downscale_4k":
+            # Check if 4K/2K, downscale to 1080p maintaining aspect ratio
+            max_edge = max(orig_w, orig_h)
+            min_edge = min(orig_w, orig_h)
+            if max_edge > 1920 or min_edge > 1080:
+                target_w, target_h = calculate_target_resolution_py(orig_w, orig_h)
+                log(f"[INFO] 4K/2K detected. Downscaling to {target_w}x{target_h} using Lanczos CRF 16")
+                scale_filter = f"scale={target_w}:{target_h}:flags=lanczos"
+                cmd = [
+                    "ffmpeg", "-y", "-i", in_path,
+                    "-map", "0:v:0", "-map", "0:a?",
+                    "-vf", scale_filter,
+                    "-c:v", "libx264", "-preset", "slow", "-crf", "16",
+                    "-pix_fmt", "yuv420p",
+                    "-c:a", "aac", "-b:a", "192k",
+                    "-movflags", "+faststart",
+                    processed_path
+                ]
+                proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                if proc.returncode != 0:
+                    log("[WARN] 'slow' preset failed, retrying with 'superfast'...")
+                    cmd[cmd.index("slow")] = "superfast"
+                    proc2 = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    if proc2.returncode != 0:
+                        raise RuntimeError(f"FFmpeg encoding failed: {proc2.stderr.decode('utf-8', errors='ignore')[-300:]}")
+            else:
+                log("[INFO] File is already <= 1080p. Copying stream directly without downscale...")
+                shutil.copy(in_path, processed_path)
+
+        elif mode == "passthrough_1080p":
+            log("[INFO] 1080P + Bypass mode: Ensuring 1080p container header passthrough...")
+            target_w, target_h = calculate_target_resolution_py(orig_w, orig_h)
+            cmd = [
+                "ffmpeg", "-y", "-i", in_path,
+                "-map", "0:v:0", "-map", "0:a?",
+                "-c", "copy",
+                "-movflags", "+faststart",
+                processed_path
+            ]
+            proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            if proc.returncode != 0:
+                # Transcode fallback if stream copy fails
+                cmd_tr = [
+                    "ffmpeg", "-y", "-i", in_path,
+                    "-map", "0:v:0", "-map", "0:a?",
+                    "-c:v", "libx264", "-preset", "superfast", "-crf", "16",
+                    "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k",
+                    "-movflags", "+faststart", processed_path
+                ]
+                subprocess.run(cmd_tr, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+        elif mode == "all_bypass":
+            log("[INFO] All Video + Bypass mode: Smart stream-copy remuxing...")
+            cmd = [
+                "ffmpeg", "-y", "-i", in_path,
+                "-map", "0:v:0", "-map", "0:a?",
+                "-c", "copy",
+                "-movflags", "+faststart",
+                processed_path
+            ]
+            proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            if proc.returncode != 0 or not os.path.exists(processed_path) or os.path.getsize(processed_path) < 1024:
+                cmd_hq = [
+                    "ffmpeg", "-y", "-i", in_path,
+                    "-map", "0:v:0", "-map", "0:a?",
+                    "-c:v", "libx264", "-preset", "superfast", "-crf", "16",
+                    "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k",
+                    "-movflags", "+faststart", processed_path
+                ]
+                subprocess.run(cmd_hq, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+        log(f"[INFO] Applying exact binary bypass (Target resolution: {target_w}x{target_h})...")
+        apply_bypass_to_mp4_file(processed_path, out_path, target_w, target_h)
+        log("[INFO] Processing completed successfully!")
+
+        if job_id in JOBS:
+            JOBS[job_id]["status"] = "completed"
+
+    except Exception as e:
+        err_msg = str(e)
+        print(f"[ERROR] {err_msg}")
+        if job_id in JOBS:
+            JOBS[job_id]["status"] = "error"
+            JOBS[job_id]["error"] = err_msg
+            JOBS[job_id]["logs"].append(f"[ERROR] {err_msg}")
+
+@app.route("/api/process_video", methods=["POST"])
+def api_process_video():
     if "video" not in request.files:
         return jsonify({"error": "No video file uploaded"}), 400
 
     vfile = request.files["video"]
+    mode = request.form.get("mode", "downscale_4k")
     orig_w = int(request.form.get("width", 1080) or 1080)
     orig_h = int(request.form.get("height", 1920) or 1920)
-
-    target_w, target_h = calculate_target_resolution_py(orig_w, orig_h)
 
     job_id = str(uuid.uuid4())
     job_dir = os.path.join(JOBS_DIR, job_id)
     os.makedirs(job_dir, exist_ok=True)
 
     in_path = os.path.join(job_dir, "input_video")
-    encoded_path = os.path.join(job_dir, "encoded_1080p.mp4")
-    out_path = os.path.join(job_dir, "final_bypassed.mp4")
+    processed_path = os.path.join(job_dir, "processed.mp4")
+    out_path = os.path.join(job_dir, "final.mp4")
 
-    try:
-        vfile.save(in_path)
+    vfile.save(in_path)
 
-        scale_filter = f"scale={target_w}:{target_h}:flags=lanczos"
-        cmd_encode = [
-            "ffmpeg", "-y", "-i", in_path,
-            "-map", "0:v:0", "-map", "0:a?",
-            "-vf", scale_filter,
-            "-c:v", "libx264", "-preset", "slow", "-crf", "16",
-            "-pix_fmt", "yuv420p",
-            "-c:a", "aac", "-b:a", "192k",
-            "-movflags", "+faststart",
-            encoded_path
-        ]
-        
-        enc_res = subprocess.run(cmd_encode, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        if enc_res.returncode != 0 or not os.path.exists(encoded_path):
-            cmd_encode[cmd_encode.index("slow")] = "superfast"
-            enc_res2 = subprocess.run(cmd_encode, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            if enc_res2.returncode != 0:
-                return jsonify({"error": "FFmpeg downscale failed: " + enc_res2.stderr.decode("utf-8", errors="ignore")[-300:]}), 500
+    JOBS[job_id] = {
+        "status": "processing",
+        "logs": [],
+        "out_path": out_path
+    }
 
-        apply_bypass_to_mp4_file(encoded_path, out_path, target_w, target_h)
-        return send_file(out_path, mimetype="video/mp4", as_attachment=True, download_name="downscaled_bypassed.mp4")
+    t = threading.Thread(target=background_process_job, args=(job_id, in_path, processed_path, out_path, mode, orig_w, orig_h))
+    t.start()
 
-    except Exception as er:
-        return jsonify({"error": str(er)}), 500
+    return jsonify({"job_id": job_id})
+
+@app.route("/api/job_status/<job_id>", methods=["GET"])
+def api_job_status(job_id):
+    if job_id not in JOBS:
+        return jsonify({"error": "Job not found"}), 404
+    job = JOBS[job_id]
+    return jsonify({
+        "status": job["status"],
+        "logs": job["logs"],
+        "error": job.get("error")
+    })
+
+@app.route("/api/download/<job_id>", methods=["GET"])
+def api_download(job_id):
+    if job_id not in JOBS or JOBS[job_id]["status"] != "completed":
+        return jsonify({"error": "File not ready"}), 400
+    out_path = JOBS[job_id]["out_path"]
+    if not os.path.exists(out_path):
+        return jsonify({"error": "File missing"}), 404
+    return send_file(out_path, mimetype="video/mp4", as_attachment=True, download_name="bypassed_video.mp4")
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
