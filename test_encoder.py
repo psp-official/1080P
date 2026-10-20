@@ -16,8 +16,7 @@ app = Flask(__name__)
 JOBS_DIR = "/tmp/test_encoder_jobs"
 os.makedirs(JOBS_DIR, exist_ok=True)
 
-# Job status tracker for live logs
-JOB_LOGS = {}
+JOBS = {}
 
 HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="en">
@@ -295,6 +294,21 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         .step-line.done {
             background: #6b6b70;
         }
+        .step-line.active::after {
+            content: "✦";
+            position: absolute;
+            top: -8px;
+            left: 50%;
+            transform: translateX(-50%);
+            font-size: 12px;
+            color: #7c7c82;
+            animation: moveStar 1.6s infinite linear;
+        }
+        @keyframes moveStar {
+            0% { left: 15%; opacity: 0.3; }
+            50% { left: 55%; opacity: 1; }
+            100% { left: 85%; opacity: 0.3; }
+        }
 
         .status-subdetail {
             font-size: 12px;
@@ -310,13 +324,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             border: 1px solid rgba(255, 255, 255, 0.1);
             border-radius: 12px;
             padding: 12px;
-            max-height: 140px;
+            max-height: 150px;
             overflow-y: auto;
             font-family: 'SF Mono', Monaco, Consolas, monospace;
             font-size: 11px;
             color: #00e676;
             text-align: left;
-            line-height: 1.4;
+            line-height: 1.45;
             display: none;
         }
         .log-container.visible {
@@ -349,7 +363,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             <select id="modeSelect" class="mode-select">
                 <option value="downscale_4k">4K, 2K Encoding Downscale + Bypass</option>
                 <option value="passthrough_1080p">1080P + Bypass (No Downscale)</option>
-                <option value="all_bypass">All Video + Bypass (Smart Stream Copy)</option>
+                <option value="all_bypass">All Video + Bypass (Original Resolution)</option>
             </select>
         </div>
 
@@ -415,6 +429,13 @@ const modeSelect = document.getElementById('modeSelect');
 videoInput.addEventListener('change', (e) => {
     if (e.target.files && e.target.files[0]) selectFile(e.target.files[0]);
 });
+dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('dragover'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+dropZone.addEventListener('drop', (e) => {
+    e.preventDefault();
+    dropZone.classList.remove('dragover');
+    if (e.dataTransfer.files && e.dataTransfer.files[0]) selectFile(e.dataTransfer.files[0]);
+});
 
 function formatBytesMB(bytes) {
     if (!bytes || bytes === 0) return '0 MB';
@@ -423,26 +444,199 @@ function formatBytesMB(bytes) {
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
+function hexToBytes(hex) {
+    const bytes = new Uint8Array(hex.length / 2);
+    for (let i = 0; i < bytes.length; i++) {
+        bytes[i] = parseInt(hex.substr(i * 2, 2), 16);
+    }
+    return bytes;
+}
+
+function concatBytes(arrays) {
+    let totalLen = 0;
+    for (const a of arrays) totalLen += a.byteLength;
+    const out = new Uint8Array(totalLen);
+    let offset = 0;
+    for (const a of arrays) {
+        out.set(new Uint8Array(a.buffer, a.byteOffset, a.byteLength), offset);
+        offset += a.byteLength;
+    }
+    return out;
+}
+
+function packU32BE(val) {
+    const b = new Uint8Array(4);
+    new DataView(b.buffer).setUint32(0, val >>> 0, false);
+    return b;
+}
+
+function asciiToBytes(str) {
+    const out = new Uint8Array(str.length);
+    for (let i = 0; i < str.length; i++) out[i] = str.charCodeAt(i) & 0xFF;
+    return out;
+}
+
+async function readSliceBufferSafe(file, start, end) {
+    const s = Math.max(0, start);
+    const e = Math.min(file.size, end);
+    if (e <= s) return new ArrayBuffer(0);
+    const blob = file.slice(s, e);
+    try {
+        if (typeof blob.arrayBuffer === 'function') {
+            return await blob.arrayBuffer();
+        }
+    } catch (_) {}
+    return await new Promise((resolve, reject) => {
+        const fr = new FileReader();
+        fr.onload = () => resolve(fr.result);
+        fr.onerror = () => reject(fr.error || new Error("File slice read error"));
+        fr.readAsArrayBuffer(blob);
+    });
+}
+
+const EXACT_AVC1_FTYP_32B = hexToBytes("000000206674797069736f6d0000020069736f6d69736f32617663316d703431");
+const EXACT_MVHD_120B = hexToBytes("000000786d7668640100000000000000000000000000000000000000000003e8ffffffffffffffff0001000001000000000000000000000000010000000000000000000000000000000100000000000000000000000000004000000000000000000000000000000000000000000000000000000000000003");
+const EXACT_COLR_19B = hexToBytes("00000013636f6c726e636c7800010001000100");
+const EXACT_PASP_16B = hexToBytes("00000010706173700000000100000001");
+const EXACT_BTRT_20B = hexToBytes("00000014627472740000000001312d0001312d00");
+
+function buildAppleIlstUdta(methodName = "xuqingxinnocent") {
+    const cleanName = (methodName || "xuqingxinnocent").trim();
+    const verName = cleanName.endsWith("-v2.0.0") ? cleanName : `${cleanName}-v2.0.0`;
+    const enc = new TextEncoder();
+    const cleanBytes = enc.encode(cleanName);
+    const verBytes = enc.encode(verName);
+
+    const items = [
+        [hexToBytes("a9415254"), cleanBytes],
+        [hexToBytes("a96e616d"), cleanBytes],
+        [hexToBytes("a9746f6f"), verBytes],
+        [hexToBytes("a9656e63"), verBytes],
+        [hexToBytes("a9777274"), cleanBytes],
+        [hexToBytes("a9636d74"), verBytes],
+        [asciiToBytes("cprt"),   verBytes]
+    ];
+
+    const hdlrBox = hexToBytes("0000002168646c7200000000000000006d6469726170706c000000000000000000");
+    const ilstChildren = [];
+
+    for (const [tag4, valBytes] of items) {
+        const dataBox = concatBytes([
+            packU32BE(16 + valBytes.byteLength),
+            asciiToBytes("data"),
+            packU32BE(1),
+            packU32BE(0),
+            valBytes
+        ]);
+        const itemBox = concatBytes([
+            packU32BE(8 + dataBox.byteLength),
+            tag4,
+            dataBox
+        ]);
+        ilstChildren.push(itemBox);
+    }
+
+    const ilstPayload = concatBytes(ilstChildren);
+    const ilstBox = concatBytes([packU32BE(8 + ilstPayload.byteLength), asciiToBytes("ilst"), ilstPayload]);
+    const metaPayload = concatBytes([new Uint8Array(4), hdlrBox, ilstBox]);
+    const metaBox = concatBytes([packU32BE(8 + metaPayload.byteLength), asciiToBytes("meta"), metaPayload]);
+    const udtaBox = concatBytes([packU32BE(8 + metaBox.byteLength), asciiToBytes("udta"), metaBox]);
+    return udtaBox;
+}
+
 async function detectMp4SpecsFromFile(file) {
-    let width = 1080, height = 1920, fps = 30;
+    let width = 0, height = 0, fps = 0;
+
     try {
         const dims = await new Promise((resolve) => {
             const v = document.createElement('video');
             v.preload = 'metadata';
             const url = URL.createObjectURL(file);
-            const timer = setTimeout(() => { URL.revokeObjectURL(url); resolve({ w: 1080, h: 1920 }); }, 4000);
+            const timer = setTimeout(() => { URL.revokeObjectURL(url); resolve({ w: 0, h: 0 }); }, 4000);
             v.onloadedmetadata = () => {
                 clearTimeout(timer);
-                resolve({ w: v.videoWidth || 1080, h: v.videoHeight || 1920 });
+                const w = v.videoWidth || 0;
+                const h = v.videoHeight || 0;
                 URL.revokeObjectURL(url);
+                resolve({ w, h });
             };
-            v.onerror = () => { clearTimeout(timer); URL.revokeObjectURL(url); resolve({ w: 1080, h: 1920 }); };
+            v.onerror = () => {
+                clearTimeout(timer);
+                URL.revokeObjectURL(url);
+                resolve({ w: 0, h: 0 });
+            };
             v.src = url;
         });
         width = dims.w;
         height = dims.h;
     } catch (_) {}
-    return { width, height, fps };
+
+    try {
+        const parseSlice = async (startOff, endOff) => {
+            const ab = await readSliceBufferSafe(file, startOff, endOff);
+            const bytes = new Uint8Array(ab);
+            const view = new DataView(ab);
+            const len = bytes.byteLength;
+
+            for (let i = 0; i < len - 32; i++) {
+                if ((width === 0 || height === 0) &&
+                    bytes[i] === 0x74 && bytes[i+1] === 0x6B && bytes[i+2] === 0x68 && bytes[i+3] === 0x64) {
+                    const ver = bytes[i + 4];
+                    const wOff = ver === 1 ? (i + 92) : (i + 80);
+                    if (wOff + 8 <= len) {
+                        const tw = view.getUint32(wOff, false) >>> 16;
+                        const th = view.getUint32(wOff + 4, false) >>> 16;
+                        if (tw >= 120 && tw <= 7680 && th >= 120 && th <= 7680) {
+                            width = tw;
+                            height = th;
+                        }
+                    }
+                }
+                if (bytes[i] === 0x6D && bytes[i+1] === 0x64 && bytes[i+2] === 0x68 && bytes[i+3] === 0x64) {
+                    const ver = bytes[i + 4];
+                    const tsOff = ver === 1 ? (i + 24) : (i + 16);
+                    if (tsOff + 8 <= len) {
+                        const timescale = view.getUint32(tsOff, false);
+                        const searchEnd = Math.min(len - 20, i + 65536);
+                        let isVideo = false;
+                        for (let j = i + 20; j < searchEnd; j++) {
+                            if (bytes[j] === 0x76 && bytes[j+1] === 0x6D && bytes[j+2] === 0x68 && bytes[j+3] === 0x64) {
+                                isVideo = true;
+                            }
+                            if (isVideo && bytes[j] === 0x73 && bytes[j+1] === 0x74 && bytes[j+2] === 0x74 && bytes[j+3] === 0x73) {
+                                if (j + 20 <= len) {
+                                    const entryCount = view.getUint32(j + 8, false);
+                                    if (entryCount > 0) {
+                                        const sampleDelta = view.getUint32(j + 16, false);
+                                        if (sampleDelta > 0 && timescale > 0 && timescale <= 10000000) {
+                                            const calcFps = Math.round(timescale / sampleDelta);
+                                            if (calcFps >= 10 && calcFps <= 240) {
+                                                fps = calcFps;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        };
+
+        const headSize = Math.min(file.size, 8 * 1024 * 1024);
+        await parseSlice(0, headSize);
+        if ((fps === 0 || width === 0) && file.size > headSize) {
+            const tailStart = Math.max(0, file.size - 8 * 1024 * 1024);
+            await parseSlice(tailStart, file.size);
+        }
+    } catch (_) {}
+
+    return {
+        width: width || 1080,
+        height: height || 1920,
+        fps: fps || 30
+    };
 }
 
 async function selectFile(file) {
@@ -502,6 +696,313 @@ function appendLog(text) {
     logBox.scrollTop = logBox.scrollHeight;
 }
 
+function readBoxType(u8, off) {
+    return String.fromCharCode(u8[off], u8[off + 1], u8[off + 2], u8[off + 3]);
+}
+
+function calculateTargetResolution(w, h) {
+    if (!w || !h || w <= 0 || h <= 0) return { width: 1080, height: 1920 };
+    const isLandscape = w > h;
+    const maxEdge = Math.max(w, h);
+    const minEdge = Math.min(w, h);
+    if (maxEdge <= 1920 && minEdge <= 1080) {
+        const sw = (w % 2 === 0) ? w : w - 1;
+        const sh = (h % 2 === 0) ? h : h - 1;
+        return { width: Math.max(2, sw), height: Math.max(2, sh) };
+    }
+    let targetW, targetH;
+    if (isLandscape) {
+        targetH = 1080;
+        targetW = Math.round((w / h) * targetH);
+        if (targetW > 1920) {
+            targetW = 1920;
+            targetH = Math.round((h / w) * targetW);
+        }
+    } else {
+        targetW = 1080;
+        targetH = Math.round((h / w) * targetW);
+        if (targetH > 1920) {
+            targetH = 1920;
+            targetW = Math.round((w / h) * targetH);
+        }
+    }
+    targetW = (targetW % 2 === 0) ? targetW : targetW - 1;
+    targetH = (targetH % 2 === 0) ? targetH : targetH - 1;
+    return { width: Math.max(2, targetW), height: Math.max(2, targetH) };
+}
+
+function hasSubBox(u8, fourCC) {
+    const c0 = fourCC.charCodeAt(0), c1 = fourCC.charCodeAt(1), c2 = fourCC.charCodeAt(2), c3 = fourCC.charCodeAt(3);
+    for (let i = 0; i <= u8.byteLength - 4; i++) {
+        if (u8[i] === c0 && u8[i+1] === c1 && u8[i+2] === c2 && u8[i+3] === c3) return true;
+    }
+    return false;
+}
+
+function readBoxHeader(u8, view, pos, endPos) {
+    if (pos + 8 > endPos) return null;
+    let sz = view.getUint32(pos, false);
+    const tp = readBoxType(u8, pos + 4);
+    let hdrLen = 8;
+    if (sz === 1) {
+        if (pos + 16 > endPos) return null;
+        const hi = view.getUint32(pos + 8, false);
+        const lo = view.getUint32(pos + 12, false);
+        sz = hi * 4294967296 + lo;
+        hdrLen = 16;
+    } else if (sz === 0) {
+        sz = endPos - pos;
+    }
+    if (sz < hdrLen || pos + sz > endPos) return null;
+    return { size: sz, type: tp, hdrLen };
+}
+
+function rebuildBoxInBrowser(boxData, isVideoTrak, targetW, targetH) {
+    const rootView = new DataView(boxData.buffer, boxData.byteOffset, boxData.byteLength);
+    const rootHdr = readBoxHeader(boxData, rootView, 0, boxData.byteLength);
+    if (!rootHdr) return boxData;
+
+    const btype = rootHdr.type;
+    if (btype === "trak") {
+        isVideoTrak = hasSubBox(boxData, "vmhd");
+    }
+
+    if (btype === "tkhd") {
+        const outTkhd = new Uint8Array(boxData);
+        const view = new DataView(outTkhd.buffer, outTkhd.byteOffset, outTkhd.byteLength);
+        const ver = outTkhd[rootHdr.hdrLen];
+        const wOff = (rootHdr.hdrLen - 8) + (ver === 1 ? 96 : 84);
+        if (wOff + 8 <= outTkhd.byteLength) {
+            if (isVideoTrak) {
+                view.setUint32(wOff, (targetW << 16) >>> 0, false);
+                view.setUint32(wOff + 4, (targetH << 16) >>> 0, false);
+            } else {
+                view.setUint32(wOff, 0, false);
+                view.setUint32(wOff + 4, 0, false);
+            }
+        }
+        return outTkhd;
+    }
+
+    if (btype === "stsd" && isVideoTrak) {
+        if (boxData.byteLength >= 102) {
+            const entryType = readBoxType(boxData, 20);
+            const view = new DataView(boxData.buffer, boxData.byteOffset, boxData.byteLength);
+            if (entryType === "avc1") {
+                let avccBox = null;
+                let btrtBox = EXACT_BTRT_20B;
+                let subPos = 16 + 86;
+                const subEnd = boxData.byteLength;
+                while (subPos + 8 <= subEnd) {
+                    const ssz = view.getUint32(subPos, false);
+                    const stp = readBoxType(boxData, subPos + 4);
+                    if (ssz < 8 || subPos + ssz > subEnd) break;
+                    if (stp === "avcC") {
+                        avccBox = boxData.slice(subPos, subPos + ssz);
+                    } else if (stp === "btrt" && ssz === 20) {
+                        btrtBox = boxData.slice(subPos, subPos + ssz);
+                    }
+                    subPos += ssz;
+                }
+                if (avccBox) {
+                    const avc1Hdr = boxData.slice(16, 16 + 86);
+                    const hdrView = new DataView(avc1Hdr.buffer, avc1Hdr.byteOffset, avc1Hdr.byteLength);
+                    hdrView.setUint16(32, targetW, false);
+                    hdrView.setUint16(34, targetH, false);
+                    for (let z = 50; z < 82; z++) avc1Hdr[z] = 0;
+
+                    const avc1Children = concatBytes([avccBox, EXACT_COLR_19B, EXACT_PASP_16B, btrtBox]);
+                    const avc1Size = 86 + avc1Children.byteLength;
+                    hdrView.setUint32(0, avc1Size >>> 0, false);
+
+                    const avc1Box = concatBytes([avc1Hdr, avc1Children]);
+                    return concatBytes([
+                        packU32BE(16 + avc1Box.byteLength),
+                        asciiToBytes("stsd"),
+                        packU32BE(0),
+                        packU32BE(1),
+                        avc1Box
+                    ]);
+                }
+            } else if (entryType === "hvc1" || entryType === "hev1") {
+                const outStsd = new Uint8Array(boxData);
+                if (outStsd.byteLength >= 16 + 36) {
+                    const stsdView = new DataView(outStsd.buffer, outStsd.byteOffset, outStsd.byteLength);
+                    stsdView.setUint16(16 + 32, targetW, false);
+                    stsdView.setUint16(16 + 34, targetH, false);
+                }
+                return outStsd;
+            }
+        }
+    }
+
+    const containers = { "trak": 1, "mdia": 1, "minf": 1, "stbl": 1 };
+    if (!containers[btype]) {
+        return boxData;
+    }
+
+    let cpos = rootHdr.hdrLen;
+    const cend = boxData.byteLength;
+    const children = [];
+    while (cpos + 8 <= cend) {
+        const ch = readBoxHeader(boxData, rootView, cpos, cend);
+        if (!ch) break;
+        const childSlice = boxData.subarray(cpos, cpos + ch.size);
+        children.push(rebuildBoxInBrowser(childSlice, isVideoTrak, targetW, targetH));
+        cpos += ch.size;
+    }
+    const childrenBytes = concatBytes(children);
+    return concatBytes([packU32BE(8 + childrenBytes.byteLength), asciiToBytes(btype), childrenBytes]);
+}
+
+function shiftStcoInBrowser(buf, start, endIdx, delta) {
+    const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+    let cur = start;
+    const containers = { "trak": 1, "mdia": 1, "minf": 1, "stbl": 1, "edts": 1, "dinf": 1 };
+    while (cur + 8 <= endIdx) {
+        const bh = readBoxHeader(buf, view, cur, endIdx);
+        if (!bh) break;
+        const bsz = bh.size;
+        const btp = bh.type;
+        if (containers[btp]) {
+            shiftStcoInBrowser(buf, cur + bh.hdrLen, cur + bsz, delta);
+        } else if (btp === "stco") {
+            const cnt = view.getUint32(cur + 12, false);
+            for (let k = 0; k < cnt; k++) {
+                const op = cur + 16 + k * 4;
+                if (op + 4 <= cur + bsz) {
+                    const oldV = view.getUint32(op, false);
+                    const newV = Math.max(0, oldV + delta);
+                    view.setUint32(op, newV >>> 0, false);
+                }
+            }
+        } else if (btp === "co64") {
+            const cnt = view.getUint32(cur + 12, false);
+            for (let k = 0; k < cnt; k++) {
+                const op = cur + 16 + k * 8;
+                if (op + 8 <= cur + bsz) {
+                    const hi = view.getUint32(op, false);
+                    const lo = view.getUint32(op + 4, false);
+                    const oldV = hi * 4294967296 + lo;
+                    const newV = Math.max(0, oldV + delta);
+                    const newHi = Math.floor(newV / 4294967296);
+                    const newLo = (newV % 4294967296) >>> 0;
+                    view.setUint32(op, newHi >>> 0, false);
+                    view.setUint32(op + 4, newLo, false);
+                }
+            }
+        }
+        cur += bsz;
+    }
+}
+
+async function locateMoovAndMdatClient(file) {
+    const fileSize = file.size;
+    let pos = 0;
+    let moovPos = -1, moovSize = 0;
+    let mdatPos = -1, mdatSize = 0;
+
+    let safetySteps = 0;
+    while (pos + 8 <= fileSize && safetySteps < 10000) {
+        safetySteps++;
+        const hdrAb = await readSliceBufferSafe(file, pos, Math.min(fileSize, pos + 16));
+        if (hdrAb.byteLength < 8) break;
+        const hdrView = new DataView(hdrAb);
+        const hdrU8 = new Uint8Array(hdrAb);
+        let sz = hdrView.getUint32(0, false);
+        const tp = readBoxType(hdrU8, 4);
+
+        if (sz === 1) {
+            if (hdrAb.byteLength < 16) break;
+            const hi = hdrView.getUint32(8, false);
+            const lo = hdrView.getUint32(12, false);
+            sz = hi * 4294967296 + lo;
+        } else if (sz === 0) {
+            sz = fileSize - pos;
+        }
+        if (!/^[ -~]{4}$/.test(tp) || sz < 8 || pos + sz > fileSize) break;
+        if (tp === "moov") { moovPos = pos; moovSize = sz; }
+        else if (tp === "mdat" && sz > mdatSize) { mdatPos = pos; mdatSize = sz; }
+        pos += sz;
+    }
+    return { moovPos, moovSize, mdatPos, mdatSize };
+}
+
+async function tryFastClientSideBypass(file, targetW, targetH) {
+    appendLog(`[CLIENT] Scanning MP4 atoms locally (zero-upload fast path)...`);
+    const { moovPos, moovSize, mdatPos, mdatSize } = await locateMoovAndMdatClient(file);
+    if (moovPos === -1 || mdatPos === -1) {
+        appendLog(`[CLIENT] Standard moov/mdat not at top-level. Routing to Server FFmpeg...`);
+        return null;
+    }
+    setStepperState('Reading File', 35, 2, `Found moov (${(moovSize/1024).toFixed(1)} KB) & mdat`);
+    appendLog(`[CLIENT] Found moov at offset ${moovPos}, mdat at ${mdatPos}`);
+    await sleep(120);
+
+    const moovAb = await readSliceBufferSafe(file, moovPos, moovPos + moovSize);
+    const moovBytes = new Uint8Array(moovAb);
+
+    setStepperState('Converting Video', 65, 3, `Applying header resolution: ${targetW}x${targetH}`);
+    appendLog(`[CLIENT] Rebuilding tkhd/stsd headers to ${targetW}x${targetH}...`);
+    await sleep(150);
+
+    const moovView = new DataView(moovBytes.buffer, moovBytes.byteOffset, moovBytes.byteLength);
+    const moovRootHdr = readBoxHeader(moovBytes, moovView, 0, moovBytes.byteLength);
+    let mpos = moovRootHdr ? moovRootHdr.hdrLen : 8;
+    const mend = moovBytes.byteLength;
+    const newMoovChildrenList = [EXACT_MVHD_120B];
+
+    while (mpos + 8 <= mend) {
+        const mh = readBoxHeader(moovBytes, moovView, mpos, mend);
+        if (!mh) break;
+        if (mh.type !== "mvhd" && mh.type !== "udta") {
+            const boxSlice = moovBytes.subarray(mpos, mpos + mh.size);
+            newMoovChildrenList.push(rebuildBoxInBrowser(boxSlice, false, targetW, targetH));
+        }
+        mpos += mh.size;
+    }
+
+    setStepperState('Applying Bypass', 88, 4, 'Injecting Apple ilst/udta & shifting stco/co64...');
+    appendLog(`[CLIENT] Injecting xuqingxinnocent-v2.0.0 metadata & recalculating offsets...`);
+    await sleep(150);
+
+    newMoovChildrenList.push(buildAppleIlstUdta("xuqingxinnocent"));
+    const newMoovChildren = concatBytes(newMoovChildrenList);
+    const newMoovSize = 8 + newMoovChildren.byteLength;
+    const newMdatPos = EXACT_AVC1_FTYP_32B.byteLength + newMoovSize;
+
+    const mdatHdrAb = await readSliceBufferSafe(file, mdatPos, Math.min(file.size, mdatPos + 16));
+    const mdatHdrView = new DataView(mdatHdrAb);
+    const origMdatSizeField = mdatHdrAb.byteLength >= 4 ? mdatHdrView.getUint32(0, false) : 0;
+    const origMdatHdrLen = (origMdatSizeField === 1) ? 16 : 8;
+    const mdatPayloadPos = mdatPos + origMdatHdrLen;
+    const mdatPayloadSize = mdatSize - origMdatHdrLen;
+
+    let newMdatHdr;
+    if (mdatPayloadSize + 8 > 0xFFFFFFFF) {
+        newMdatHdr = new Uint8Array(16);
+        const mv = new DataView(newMdatHdr.buffer);
+        mv.setUint32(0, 1, false);
+        newMdatHdr.set(asciiToBytes("mdat"), 4);
+        const total64 = mdatPayloadSize + 16;
+        mv.setUint32(8, Math.floor(total64 / 4294967296) >>> 0, false);
+        mv.setUint32(12, (total64 % 4294967296) >>> 0, false);
+    } else {
+        newMdatHdr = concatBytes([packU32BE(mdatPayloadSize + 8), asciiToBytes("mdat")]);
+    }
+
+    const newMdatPayloadPos = newMdatPos + newMdatHdr.byteLength;
+    const delta = newMdatPayloadPos - mdatPayloadPos;
+    if (delta !== 0) {
+        shiftStcoInBrowser(newMoovChildren, 0, newMoovChildren.byteLength, delta);
+    }
+
+    const newMoovBox = concatBytes([packU32BE(newMoovSize), asciiToBytes("moov"), newMoovChildren]);
+    const mdatPayloadSlice = file.slice(mdatPayloadPos, mdatPayloadPos + mdatPayloadSize);
+    appendLog(`[CLIENT] Zero-copy MP4 assembly complete!`);
+    return new Blob([EXACT_AVC1_FTYP_32B, newMoovBox, newMdatHdr, mdatPayloadSlice], { type: 'video/mp4' });
+}
+
 async function startProcess() {
     if (!selectedFile) {
         document.getElementById('videoInput').click();
@@ -513,24 +1014,60 @@ async function startProcess() {
     document.getElementById('logContainer').innerHTML = '';
 
     const selectedMode = modeSelect.value;
-    const formData = new FormData();
-    formData.append('video', selectedFile);
-    formData.append('mode', selectedMode);
-    formData.append('width', String(detectedSpecs.width));
-    formData.append('height', String(detectedSpecs.height));
+    const origW = detectedSpecs.width || 1080;
+    const origH = detectedSpecs.height || 1920;
+    const fps = detectedSpecs.fps || 60;
 
     setStepperState('Loading File', 10, 1, 'Initializing job stream...');
-    appendLog(`[INFO] Selected mode: ${selectedMode}`);
-    appendLog(`[INFO] Input resolution: ${detectedSpecs.width}x${detectedSpecs.height}`);
+    appendLog(`[INFO] Mode: ${selectedMode}`);
+    appendLog(`[INFO] Input: ${origW}x${origH} @ ${fps}fps (${formatBytesMB(selectedFile.size)})`);
 
     try {
+        // Fast Client-Side Path for passthrough_1080p and all_bypass (if valid MP4)
+        if (selectedMode === 'passthrough_1080p' || selectedMode === 'all_bypass') {
+            const targetRes = (selectedMode === 'passthrough_1080p')
+                ? calculateTargetResolution(origW, origH)
+                : { width: origW, height: origH };
+
+            const fastBlob = await tryFastClientSideBypass(selectedFile, targetRes.width, targetRes.height);
+            if (fastBlob) {
+                const baseName = (selectedFile.name || "video").replace(/\.[^/.]+$/, "");
+                const outFilename = `${baseName}_xuqingxinnocent_${targetRes.width}x${targetRes.height}_${fps}fps.mp4`;
+
+                if (lastOutputBlobUrl) URL.revokeObjectURL(lastOutputBlobUrl);
+                lastOutputBlobUrl = URL.createObjectURL(fastBlob);
+
+                const a = document.createElement('a');
+                a.style.display = 'none';
+                a.href = lastOutputBlobUrl;
+                a.download = outFilename;
+                document.body.appendChild(a);
+                a.click();
+                setTimeout(() => a.remove(), 3000);
+
+                setStepperState('Completed', 100, 5, outFilename);
+                startBtn.disabled = false;
+                return;
+            }
+        }
+
+        // Server-side Upload & Live FFmpeg Progress Polling
+        const formData = new FormData();
+        formData.append('video', selectedFile);
+        formData.append('mode', selectedMode);
+        formData.append('width', String(origW));
+        formData.append('height', String(origH));
+
+        appendLog(`[UPLOAD] Uploading file to server for FFmpeg processing...`);
+        setStepperState('Uploading File', 18, 2, 'Uploading video to server...');
+
         const resp = await fetch('/api/process_video', {
             method: 'POST',
             body: formData
         });
 
         if (!resp.ok) {
-            let errMsg = 'Processing failed';
+            let errMsg = 'Upload/Processing failed';
             try {
                 const j = await resp.json();
                 if (j && j.error) errMsg = j.error;
@@ -540,27 +1077,30 @@ async function startProcess() {
 
         const data = await resp.json();
         const jobId = data.job_id;
+        appendLog(`[SERVER] Job queued: ${jobId}`);
 
-        // Start polling logs and progress
-        setStepperState('Converting & Downscaling', 35, 3, 'Processing video stream...');
-        
+        setStepperState('Converting & Downscaling', 30, 3, 'FFmpeg processing in progress...');
+        let displayedCount = 0;
+
         logPollInterval = setInterval(async () => {
             try {
                 const lResp = await fetch(`/api/job_status/${jobId}`);
                 if (lResp.ok) {
                     const lData = await lResp.json();
-                    if (lData.logs && lData.logs.length > 0) {
-                        const currentLines = document.getElementById('logContainer').children.length;
-                        for (let k = currentLines; k < lData.logs.length; k++) {
+                    if (lData.logs && lData.logs.length > displayedCount) {
+                        for (let k = displayedCount; k < lData.logs.length; k++) {
                             appendLog(lData.logs[k]);
                         }
+                        displayedCount = lData.logs.length;
+                    }
+                    if (lData.progress) {
+                        setStepperState(lData.stage || 'Converting & Downscaling', lData.progress, lData.step || 3, lData.detail || '');
                     }
                     if (lData.status === 'completed') {
                         clearInterval(logPollInterval);
-                        setStepperState('Applying Bypass', 90, 4, 'Finalizing stream...');
-                        await sleep(300);
-                        
-                        // Trigger download
+                        setStepperState('Applying Bypass', 95, 4, 'Downloading output file...');
+                        await sleep(250);
+
                         const dResp = await fetch(`/api/download/${jobId}`);
                         if (dResp.ok) {
                             const blob = await dResp.blob();
@@ -585,11 +1125,13 @@ async function startProcess() {
                         }
                     } else if (lData.status === 'error') {
                         clearInterval(logPollInterval);
-                        throw new Error(lData.error || "Processing failed on server");
+                        setStepperState('Error', 0, 1, lData.error || "Processing failed on server");
+                        appendLog(`[ERROR] ${lData.error || "Processing failed"}`);
+                        startBtn.disabled = false;
                     }
                 }
-            } catch (err) {
-                // Ignore transient polling network errors
+            } catch (pollErr) {
+                // Ignore transient network poll glitch
             }
         }, 800);
 
@@ -605,11 +1147,15 @@ async function startProcess() {
 </html>
 """
 
+# Use binascii.unhexlify for all binary constants so NO literal null bytes ever exist in the source code!
 EXACT_AVC1_FTYP_32B = binascii.unhexlify("000000206674797069736f6d0000020069736f6d69736f32617663316d703431")
 EXACT_MVHD_120B = binascii.unhexlify("000000786d7668640100000000000000000000000000000000000000000003e8ffffffffffffffff0001000001000000000000000000000000010000000000000000000000000000000100000000000000000000000000004000000000000000000000000000000000000000000000000000000000000003")
 EXACT_COLR_19B = binascii.unhexlify("00000013636f6c726e636c7800010001000100")
 EXACT_PASP_16B = binascii.unhexlify("00000010706173700000000100000001")
 EXACT_BTRT_20B = binascii.unhexlify("00000014627472740000000001312d0001312d00")
+ZERO_4B = binascii.unhexlify("00000000")
+ZERO_32B = binascii.unhexlify("00" * 32)
+
 
 def build_apple_ilst_udta_py(method_name="xuqingxinnocent"):
     clean_name = (method_name or "xuqingxinnocent").strip()
@@ -636,10 +1182,11 @@ def build_apple_ilst_udta_py(method_name="xuqingxinnocent"):
 
     ilst_payload = b"".join(ilst_children)
     ilst_box = struct.pack(">I4s", 8 + len(ilst_payload), b"ilst") + ilst_payload
-    meta_payload = b"    " + hdlr_box + ilst_box
+    meta_payload = ZERO_4B + hdlr_box + ilst_box
     meta_box = struct.pack(">I4s", 8 + len(meta_payload), b"meta") + meta_payload
     udta_box = struct.pack(">I4s", 8 + len(meta_box), b"udta") + meta_box
     return udta_box
+
 
 def calculate_target_resolution_py(w, h):
     if not w or not h or w <= 0 or h <= 0:
@@ -663,11 +1210,12 @@ def calculate_target_resolution_py(w, h):
         target_h = round((h / w) * target_w)
         if target_h > 1920:
             target_h = 1920
-            target_w = round((w / h) * target_w)
+            target_w = round((w / h) * target_h)
 
     target_w = target_w if target_w % 2 == 0 else target_w - 1
     target_h = target_h if target_h % 2 == 0 else target_h - 1
     return max(2, target_w), max(2, target_h)
+
 
 def rebuild_box_py(box_data, is_video_trak, target_w, target_h):
     if len(box_data) < 8:
@@ -711,7 +1259,7 @@ def rebuild_box_py(box_data, is_video_trak, target_w, target_h):
             if avcc_box:
                 avc1_hdr = bytearray(box_data[16:16 + 86])
                 struct.pack_into(">HH", avc1_hdr, 32, target_w, target_h)
-                avc1_hdr[50:82] = b" " * 32
+                avc1_hdr[50:82] = ZERO_32B
                 avc1_children = avcc_box + EXACT_COLR_19B + EXACT_PASP_16B + btrt_box
                 avc1_size = 86 + len(avc1_children)
                 struct.pack_into(">I", avc1_hdr, 0, avc1_size)
@@ -742,6 +1290,7 @@ def rebuild_box_py(box_data, is_video_trak, target_w, target_h):
 
     children_bytes = b"".join(children)
     return struct.pack(">I4s", 8 + len(children_bytes), btype) + children_bytes
+
 
 def shift_stco_py(buf, start, end_idx, delta):
     cur = start
@@ -775,6 +1324,7 @@ def shift_stco_py(buf, start, end_idx, delta):
                     new_v = max(0, old_v + delta)
                     struct.pack_into(">Q", buf, op, new_v)
         cur += bsz
+
 
 def apply_bypass_to_mp4_file(in_mp4_path, out_mp4_path, target_w, target_h):
     file_size = os.path.getsize(in_mp4_path)
@@ -861,54 +1411,97 @@ def apply_bypass_to_mp4_file(in_mp4_path, out_mp4_path, target_w, target_h):
             fout.write(chunk)
             remaining -= len(chunk)
 
+
+def run_ffmpeg_with_live_logs(cmd, job_id, log_fn):
+    """Runs FFmpeg using Popen and streams real-time frame/fps/time progress into job logs."""
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        universal_newlines=True,
+        bufsize=1
+    )
+    last_log_time = 0
+    stderr_tail = []
+    for line in proc.stderr:
+        clean_line = line.strip()
+        if not clean_line:
+            continue
+        stderr_tail.append(clean_line)
+        if len(stderr_tail) > 15:
+            stderr_tail.pop(0)
+        if "frame=" in clean_line or "time=" in clean_line:
+            now = time.time()
+            if now - last_log_time >= 1.5:
+                log_fn(f"[FFMPEG] {clean_line}")
+                if job_id in JOBS:
+                    JOBS[job_id]["detail"] = clean_line[:75]
+                    JOBS[job_id]["progress"] = min(84, JOBS[job_id].get("progress", 35) + 4)
+                last_log_time = now
+    proc.wait()
+    return proc.returncode, "\n".join(stderr_tail)
+
+
 @app.route("/", methods=["GET"])
 def index():
     return render_template_string(HTML_TEMPLATE)
 
+
 def background_process_job(job_id, in_path, processed_path, out_path, mode, orig_w, orig_h):
     try:
         def log(msg):
-            print(msg)
+            print(msg, flush=True)
             if job_id in JOBS:
                 JOBS[job_id]["logs"].append(msg)
 
-        log(f"[INFO] Starting job {job_id} with mode: {mode}")
-        log(f"[INFO] Input specs: width={orig_w}, height={orig_h}")
+        log(f"[INFO] Job {job_id[:8]} started (Mode: {mode})")
 
+        # Probe actual dimensions via ffprobe if available
+        try:
+            probe_cmd = [
+                "ffprobe", "-v", "error", "-select_streams", "v:0",
+                "-show_entries", "stream=width,height", "-of", "json", in_path
+            ]
+            p_res = subprocess.run(probe_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            if p_res.returncode == 0:
+                p_data = json.loads(p_res.stdout.decode("utf-8", errors="ignore"))
+                streams = p_data.get("streams", [])
+                if streams:
+                    orig_w = int(streams[0].get("width", orig_w) or orig_w)
+                    orig_h = int(streams[0].get("height", orig_h) or orig_h)
+        except Exception:
+            pass
+
+        log(f"[INFO] Source resolution: {orig_w}x{orig_h}")
         target_w, target_h = orig_w, orig_h
 
         if mode == "downscale_4k":
-            # Check if 4K/2K, downscale to 1080p maintaining aspect ratio
-            max_edge = max(orig_w, orig_h)
-            min_edge = min(orig_w, orig_h)
-            if max_edge > 1920 or min_edge > 1080:
-                target_w, target_h = calculate_target_resolution_py(orig_w, orig_h)
-                log(f"[INFO] 4K/2K detected. Downscaling to {target_w}x{target_h} using Lanczos CRF 16")
-                scale_filter = f"scale={target_w}:{target_h}:flags=lanczos"
-                cmd = [
-                    "ffmpeg", "-y", "-i", in_path,
-                    "-map", "0:v:0", "-map", "0:a?",
-                    "-vf", scale_filter,
-                    "-c:v", "libx264", "-preset", "slow", "-crf", "16",
-                    "-pix_fmt", "yuv420p",
-                    "-c:a", "aac", "-b:a", "192k",
-                    "-movflags", "+faststart",
-                    processed_path
-                ]
-                proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                if proc.returncode != 0:
-                    log("[WARN] 'slow' preset failed, retrying with 'superfast'...")
-                    cmd[cmd.index("slow")] = "superfast"
-                    proc2 = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                    if proc2.returncode != 0:
-                        raise RuntimeError(f"FFmpeg encoding failed: {proc2.stderr.decode('utf-8', errors='ignore')[-300:]}")
-            else:
-                log("[INFO] File is already <= 1080p. Copying stream directly without downscale...")
-                shutil.copy(in_path, processed_path)
+            target_w, target_h = calculate_target_resolution_py(orig_w, orig_h)
+            log(f"[INFO] Target 1080p aspect-ratio scale: {target_w}x{target_h}")
+            scale_filter = f"scale={target_w}:{target_h}:flags=lanczos"
+            # Use 'veryfast' with CRF 16 so 1.5GB 4K files encode rapidly on cloud CPUs without losing quality
+            cmd = [
+                "ffmpeg", "-y", "-i", in_path,
+                "-map", "0:v:0", "-map", "0:a?",
+                "-vf", scale_filter,
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "16",
+                "-pix_fmt", "yuv420p",
+                "-c:a", "aac", "-b:a", "192k",
+                "-movflags", "+faststart",
+                processed_path
+            ]
+            log(f"[INFO] Encoding {orig_w}x{orig_h} -> {target_w}x{target_h} (CRF 16 Lanczos)...")
+            rc, err_tail = run_ffmpeg_with_live_logs(cmd, job_id, log)
+            if rc != 0:
+                log("[WARN] Retrying with ultrafast preset...")
+                cmd[cmd.index("veryfast")] = "ultrafast"
+                rc2, err_tail2 = run_ffmpeg_with_live_logs(cmd, job_id, log)
+                if rc2 != 0:
+                    raise RuntimeError(f"FFmpeg encode error: {err_tail2[-250:]}")
 
         elif mode == "passthrough_1080p":
-            log("[INFO] 1080P + Bypass mode: Ensuring 1080p container header passthrough...")
             target_w, target_h = calculate_target_resolution_py(orig_w, orig_h)
+            log(f"[INFO] 1080P + Bypass mode: Stream copy remux (Header: {target_w}x{target_h})...")
             cmd = [
                 "ffmpeg", "-y", "-i", in_path,
                 "-map", "0:v:0", "-map", "0:a?",
@@ -916,9 +1509,9 @@ def background_process_job(job_id, in_path, processed_path, out_path, mode, orig
                 "-movflags", "+faststart",
                 processed_path
             ]
-            proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            if proc.returncode != 0:
-                # Transcode fallback if stream copy fails
+            rc, err_tail = run_ffmpeg_with_live_logs(cmd, job_id, log)
+            if rc != 0 or not os.path.exists(processed_path) or os.path.getsize(processed_path) < 1024:
+                log("[WARN] Stream copy not compatible, transcoding at CRF 16...")
                 cmd_tr = [
                     "ffmpeg", "-y", "-i", in_path,
                     "-map", "0:v:0", "-map", "0:a?",
@@ -926,10 +1519,13 @@ def background_process_job(job_id, in_path, processed_path, out_path, mode, orig
                     "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k",
                     "-movflags", "+faststart", processed_path
                 ]
-                subprocess.run(cmd_tr, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                rc2, err_tail2 = run_ffmpeg_with_live_logs(cmd_tr, job_id, log)
+                if rc2 != 0:
+                    raise RuntimeError(f"FFmpeg fallback failed: {err_tail2[-250:]}")
 
         elif mode == "all_bypass":
-            log("[INFO] All Video + Bypass mode: Smart stream-copy remuxing...")
+            target_w, target_h = orig_w, orig_h
+            log(f"[INFO] All Video + Bypass: Keeping original resolution {target_w}x{target_h}...")
             cmd = [
                 "ffmpeg", "-y", "-i", in_path,
                 "-map", "0:v:0", "-map", "0:a?",
@@ -937,8 +1533,9 @@ def background_process_job(job_id, in_path, processed_path, out_path, mode, orig
                 "-movflags", "+faststart",
                 processed_path
             ]
-            proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            if proc.returncode != 0 or not os.path.exists(processed_path) or os.path.getsize(processed_path) < 1024:
+            rc, err_tail = run_ffmpeg_with_live_logs(cmd, job_id, log)
+            if rc != 0 or not os.path.exists(processed_path) or os.path.getsize(processed_path) < 1024:
+                log("[WARN] Non-MP4 codec detected, transcoding at CRF 16...")
                 cmd_hq = [
                     "ffmpeg", "-y", "-i", in_path,
                     "-map", "0:v:0", "-map", "0:a?",
@@ -946,22 +1543,32 @@ def background_process_job(job_id, in_path, processed_path, out_path, mode, orig
                     "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k",
                     "-movflags", "+faststart", processed_path
                 ]
-                subprocess.run(cmd_hq, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-
-        log(f"[INFO] Applying exact binary bypass (Target resolution: {target_w}x{target_h})...")
-        apply_bypass_to_mp4_file(processed_path, out_path, target_w, target_h)
-        log("[INFO] Processing completed successfully!")
+                rc2, err_tail2 = run_ffmpeg_with_live_logs(cmd_hq, job_id, log)
+                if rc2 != 0:
+                    raise RuntimeError(f"FFmpeg fallback failed: {err_tail2[-250:]}")
 
         if job_id in JOBS:
+            JOBS[job_id]["stage"] = "Applying Bypass"
+            JOBS[job_id]["step"] = 4
+            JOBS[job_id]["progress"] = 90
+
+        log(f"[INFO] Applying exact binary bypass ({target_w}x{target_h})...")
+        apply_bypass_to_mp4_file(processed_path, out_path, target_w, target_h)
+        out_mb = os.path.getsize(out_path) / (1024 * 1024)
+        log(f"[SUCCESS] Bypass complete! Output size: {out_mb:.2f} MB")
+
+        if job_id in JOBS:
+            JOBS[job_id]["progress"] = 100
             JOBS[job_id]["status"] = "completed"
 
     except Exception as e:
         err_msg = str(e)
-        print(f"[ERROR] {err_msg}")
+        print(f"[ERROR] {err_msg}", flush=True)
         if job_id in JOBS:
             JOBS[job_id]["status"] = "error"
             JOBS[job_id]["error"] = err_msg
             JOBS[job_id]["logs"].append(f"[ERROR] {err_msg}")
+
 
 @app.route("/api/process_video", methods=["POST"])
 def api_process_video():
@@ -985,14 +1592,23 @@ def api_process_video():
 
     JOBS[job_id] = {
         "status": "processing",
+        "stage": "Converting & Downscaling",
+        "step": 3,
+        "progress": 30,
+        "detail": "Starting FFmpeg...",
         "logs": [],
         "out_path": out_path
     }
 
-    t = threading.Thread(target=background_process_job, args=(job_id, in_path, processed_path, out_path, mode, orig_w, orig_h))
+    t = threading.Thread(
+        target=background_process_job,
+        args=(job_id, in_path, processed_path, out_path, mode, orig_w, orig_h),
+        daemon=True
+    )
     t.start()
 
     return jsonify({"job_id": job_id})
+
 
 @app.route("/api/job_status/<job_id>", methods=["GET"])
 def api_job_status(job_id):
@@ -1001,9 +1617,14 @@ def api_job_status(job_id):
     job = JOBS[job_id]
     return jsonify({
         "status": job["status"],
+        "stage": job.get("stage", "Processing"),
+        "step": job.get("step", 3),
+        "progress": job.get("progress", 35),
+        "detail": job.get("detail", ""),
         "logs": job["logs"],
         "error": job.get("error")
     })
+
 
 @app.route("/api/download/<job_id>", methods=["GET"])
 def api_download(job_id):
@@ -1013,6 +1634,7 @@ def api_download(job_id):
     if not os.path.exists(out_path):
         return jsonify({"error": "File missing"}), 404
     return send_file(out_path, mimetype="video/mp4", as_attachment=True, download_name="bypassed_video.mp4")
+
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
