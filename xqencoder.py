@@ -16,6 +16,8 @@ app = Flask(__name__)
 JOBS_DIR = "/tmp/test_encoder_jobs"
 os.makedirs(JOBS_DIR, exist_ok=True)
 
+JOBS = {}
+
 HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -52,6 +54,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             max-width: 440px;
             margin: 0 auto;
         }
+
+        /* Main Upload & File Info Card */
         .upload-card {
             background: var(--card-bg);
             border: 1px solid var(--card-border);
@@ -59,6 +63,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             overflow: hidden;
             box-shadow: 0 20px 50px rgba(0, 0, 0, 0.75);
             margin-bottom: 22px;
+            transition: border-color 0.2s ease;
+        }
+        .upload-card.dragover {
+            border-color: rgba(255, 255, 255, 0.35);
         }
         .upload-top {
             padding: 38px 24px 34px;
@@ -79,6 +87,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             display: flex;
             align-items: center;
             justify-content: center;
+            box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
         }
         .icon-box svg {
             width: 28px;
@@ -94,12 +103,16 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             font-weight: 700;
             color: #f4f4f6;
             margin: 0 0 10px;
+            letter-spacing: -0.01em;
         }
         .upload-sub {
             font-size: 14px;
+            font-weight: 500;
             color: var(--text-dim);
             margin: 0;
         }
+
+        /* File Metadata Section (Resolution, FrameRate, Size) */
         .file-meta {
             display: none;
             border-top: 1px solid rgba(255, 255, 255, 0.07);
@@ -111,9 +124,17 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             line-height: 1.5;
             margin-bottom: 14px;
             color: #d4d4d8;
+            letter-spacing: 0.01em;
         }
-        .meta-row:last-child { margin-bottom: 0; }
-        .meta-row strong { color: #ffffff; }
+        .meta-row:last-child {
+            margin-bottom: 0;
+        }
+        .meta-row strong {
+            font-weight: 700;
+            color: #ffffff;
+        }
+
+        /* Start Processing Button */
         .start-btn {
             width: 100%;
             padding: 20px 24px;
@@ -123,15 +144,24 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             color: #09090b;
             font-size: 18px;
             font-weight: 700;
+            letter-spacing: 0.01em;
             cursor: pointer;
             box-shadow: 0 8px 28px rgba(255, 255, 255, 0.12);
+            transition: opacity 0.2s ease, transform 0.15s ease;
             margin-bottom: 22px;
+        }
+        .start-btn:active {
+            transform: scale(0.99);
         }
         .start-btn:disabled {
             background: #d8d8dc;
             color: #6c6e7a;
             cursor: not-allowed;
+            box-shadow: none;
+            transform: none;
         }
+
+        /* 4-Step Progress Card (LOAD — READ — CONVERT — BYPASS) */
         .status-card {
             display: none;
             background: var(--card-bg);
@@ -139,6 +169,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             border-radius: 24px;
             padding: 24px 22px 22px;
             box-shadow: 0 16px 40px rgba(0, 0, 0, 0.65);
+            margin-bottom: 18px;
         }
         .status-top {
             display: flex;
@@ -159,6 +190,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             height: 10px;
             border-radius: 50%;
             background: #6b6b70;
+            flex-shrink: 0;
         }
         .status-dot.active {
             background: #ffffff;
@@ -173,7 +205,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             font-size: 17px;
             font-weight: 600;
             color: #9ca3af;
+            font-variant-numeric: tabular-nums;
         }
+
+        /* Stepper Track */
         .stepper {
             display: flex;
             align-items: center;
@@ -195,14 +230,62 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             border-radius: 50%;
             background: transparent;
             border: 1.6px solid #45454a;
+            transition: all 0.25s ease;
         }
-        .step-item.done .step-circle { background: #7c7c82; border-color: #7c7c82; }
-        .step-item.active .step-circle { background: #ffffff; border-color: #ffffff; box-shadow: 0 0 12px rgba(255,255,255,0.9); }
-        .step-label { font-size: 11.5px; font-weight: 600; letter-spacing: 0.08em; color: #6b6b70; text-transform: uppercase; }
-        .step-item.active .step-label, .step-item.done .step-label { color: #a1a1aa; }
-        .step-line { flex: 1; height: 1.5px; background: #27272a; margin: 0 -6px 22px; }
-        .step-line.done { background: #6b6b70; }
-        .status-subdetail { margin-top: 14px; font-size: 12.5px; color: var(--text-dim); text-align: center; word-break: break-all; }
+        .step-item.done .step-circle {
+            background: #7c7c82;
+            border-color: #7c7c82;
+        }
+        .step-item.active .step-circle {
+            background: #ffffff;
+            border-color: #ffffff;
+            box-shadow: 0 0 12px rgba(255, 255, 255, 0.9);
+        }
+        .step-label {
+            font-size: 11.5px;
+            font-weight: 600;
+            letter-spacing: 0.08em;
+            color: #6b6b70;
+            text-transform: uppercase;
+        }
+        .step-item.active .step-label,
+        .step-item.done .step-label {
+            color: #a1a1aa;
+        }
+        .step-line {
+            flex: 1;
+            height: 1.5px;
+            background: #27272a;
+            margin: 0 -6px 22px;
+            position: relative;
+            overflow: hidden;
+        }
+        .step-line.done {
+            background: #6b6b70;
+        }
+        .step-line.active::after {
+            content: "✦";
+            position: absolute;
+            top: -8px;
+            left: 50%;
+            transform: translateX(-50%);
+            font-size: 12px;
+            color: #7c7c82;
+            animation: moveStar 1.6s infinite linear;
+        }
+        @keyframes moveStar {
+            0% { left: 15%; opacity: 0.3; }
+            50% { left: 55%; opacity: 1; }
+            100% { left: 85%; opacity: 0.3; }
+        }
+
+        .status-subdetail {
+            margin-top: 14px;
+            font-size: 12.5px;
+            color: var(--text-dim);
+            text-align: center;
+            word-break: break-all;
+        }
     </style>
 </head>
 <body>
@@ -233,7 +316,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         <div class="status-top">
             <div class="status-left">
                 <span class="status-dot active" id="statusDot"></span>
-                <span id="stageText">Processing File</span>
+                <span id="stageText">Reading File</span>
             </div>
             <div class="status-pct" id="pctText">0%</div>
         </div>
@@ -275,13 +358,22 @@ const dropZone = document.getElementById('dropZone');
 videoInput.addEventListener('change', (e) => {
     if (e.target.files && e.target.files[0]) selectFile(e.target.files[0]);
 });
+dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('dragover'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+dropZone.addEventListener('drop', (e) => {
+    e.preventDefault();
+    dropZone.classList.remove('dragover');
+    if (e.dataTransfer.files && e.dataTransfer.files[0]) selectFile(e.dataTransfer.files[0]);
+});
 
 function formatBytesMB(bytes) {
     if (!bytes || bytes === 0) return '0 MB';
     return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
 }
 
-function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+function sleep(ms) {
+    return new Promise(r => setTimeout(r, ms));
+}
 
 async function detectMp4SpecsFromFile(file) {
     let width = 1080, height = 1920, fps = 30;
@@ -321,8 +413,18 @@ async function selectFile(file) {
 function setStepperState(stageTitle, pct, stepIdx, detailText) {
     document.getElementById('statusCard').style.display = 'block';
     document.getElementById('stageText').textContent = stageTitle;
-    document.getElementById('pctText').textContent = Math.round(pct) + '%';
+    const clamped = Math.max(0, Math.min(100, Math.round(pct)));
+    document.getElementById('pctText').textContent = clamped + '%';
     document.getElementById('detailMeta').textContent = detailText || '';
+
+    const dot = document.getElementById('statusDot');
+    if (stepIdx >= 5) {
+        dot.classList.remove('active');
+        dot.style.background = '#00e676';
+    } else {
+        dot.classList.add('active');
+        dot.style.background = '';
+    }
 
     const steps = ['stepLoad', 'stepRead', 'stepConvert', 'stepBypass'];
     const lines = ['line1', 'line2', 'line3'];
@@ -330,15 +432,23 @@ function setStepperState(stageTitle, pct, stepIdx, detailText) {
     steps.forEach((id, i) => {
         const el = document.getElementById(id);
         el.classList.remove('active', 'done');
-        if (i + 1 < stepIdx || stepIdx === 5) el.classList.add('done');
-        else if (i + 1 === stepIdx) el.classList.add('active');
+        const idx = i + 1;
+        if (idx < stepIdx || stepIdx === 5) {
+            el.classList.add('done');
+        } else if (idx === stepIdx) {
+            el.classList.add('active');
+        }
     });
 
     lines.forEach((id, i) => {
         const el = document.getElementById(id);
         el.classList.remove('active', 'done');
-        if (i + 1 < stepIdx || stepIdx === 5) el.classList.add('done');
-        else if (i + 1 === stepIdx - 1) el.classList.add('active');
+        const idx = i + 1;
+        if (idx < stepIdx || stepIdx === 5) {
+            el.classList.add('done');
+        } else if (idx === stepIdx - 1) {
+            el.classList.add('active');
+        }
     });
 }
 
@@ -357,6 +467,8 @@ async function startProcess() {
 
         const formData = new FormData();
         formData.append('video', selectedFile);
+        formData.append('width', String(detectedSpecs.width));
+        formData.append('height', String(detectedSpecs.height));
 
         setStepperState('Converting & Downscaling', 45, 3, 'Encoding 4K/2K to 1080p (HQ CRF 16) + Bypass...');
         
@@ -377,10 +489,12 @@ async function startProcess() {
         setStepperState('Applying Bypass', 90, 4, 'Finalizing stream...');
         const outBlob = await resp.blob();
 
-        const baseName = (selectedFile.name || "video").replace(/\\.[^/.]+$/, "");
+        const baseName = (selectedFile.name || "video").replace(/\.[^/.]+$/, "");
         const outFilename = `${baseName}_downscale_bypassed.mp4`;
 
-        if (lastOutputBlobUrl) URL.revokeObjectURL(lastOutputBlobUrl);
+        if (lastOutputBlobUrl) {
+            try { URL.revokeObjectURL(lastOutputBlobUrl); } catch (_) {}
+        }
         lastOutputBlobUrl = URL.createObjectURL(outBlob);
 
         const a = document.createElement('a');
@@ -403,7 +517,6 @@ async function startProcess() {
 </html>
 """
 
-# Python Backend Logic with Real FFmpeg Downscale Encoding + Exact Binary Bypass
 EXACT_AVC1_FTYP_32B = binascii.unhexlify("000000206674797069736f6d0000020069736f6d69736f32617663316d703431")
 EXACT_MVHD_120B = binascii.unhexlify("000000786d7668640100000000000000000000000000000000000000000003e8ffffffffffffffff0001000001000000000000000000000000010000000000000000000000000000000100000000000000000000000000004000000000000000000000000000000000000000000000000000000000000003")
 EXACT_COLR_19B = binascii.unhexlify("00000013636f6c726e636c7800010001000100")
@@ -439,6 +552,34 @@ def build_apple_ilst_udta_py(method_name="xuqingxinnocent"):
     meta_box = struct.pack(">I4s", 8 + len(meta_payload), b"meta") + meta_payload
     udta_box = struct.pack(">I4s", 8 + len(meta_box), b"udta") + meta_box
     return udta_box
+
+def calculate_target_resolution_py(w, h):
+    if not w or not h or w <= 0 or h <= 0:
+        return 1080, 1920
+    is_landscape = w > h
+    max_edge = max(w, h)
+    min_edge = min(w, h)
+    if max_edge <= 1920 and min_edge <= 1080:
+        sw = w if w % 2 == 0 else w - 1
+        sh = h if h % 2 == 0 else h - 1
+        return max(2, sw), max(2, sh)
+
+    if is_landscape:
+        target_h = 1080
+        target_w = round((w / h) * target_h)
+        if target_w > 1920:
+            target_w = 1920
+            target_h = round((h / w) * target_w)
+    else:
+        target_w = 1080
+        target_h = round((h / w) * target_w)
+        if target_h > 1920:
+            target_h = 1920
+            target_w = round((w / h) * target_h)
+
+    target_w = target_w if target_w % 2 == 0 else target_w - 1
+    target_h = target_h if target_h % 2 == 0 else target_h - 1
+    return max(2, target_w), max(2, target_h)
 
 def rebuild_box_py(box_data, is_video_trak, target_w, target_h):
     if len(box_data) < 8:
@@ -488,6 +629,11 @@ def rebuild_box_py(box_data, is_video_trak, target_w, target_h):
                 struct.pack_into(">I", avc1_hdr, 0, avc1_size)
                 avc1_box = bytes(avc1_hdr) + avc1_children
                 return struct.pack(">I4sII", 16 + len(avc1_box), b"stsd", 0, 1) + avc1_box
+        elif entry_type in (b"hvc1", b"hev1"):
+            out = bytearray(box_data)
+            if len(out) >= 16 + 36:
+                struct.pack_into(">HH", out, 16 + 32, target_w, target_h)
+            return bytes(out)
 
     if btype not in (b"trak", b"mdia", b"minf", b"stbl"):
         return box_data
@@ -637,6 +783,11 @@ def api_downscale_bypass():
         return jsonify({"error": "No video file uploaded"}), 400
 
     vfile = request.files["video"]
+    orig_w = int(request.form.get("width", 1080) or 1080)
+    orig_h = int(request.form.get("height", 1920) or 1920)
+
+    target_w, target_h = calculate_target_resolution_py(orig_w, orig_h)
+
     job_id = str(uuid.uuid4())
     job_dir = os.path.join(JOBS_DIR, job_id)
     os.makedirs(job_dir, exist_ok=True)
@@ -648,40 +799,6 @@ def api_downscale_bypass():
     try:
         vfile.save(in_path)
 
-        # Probe input video dimensions to calculate exact 1080p aspect-ratio downscale
-        probe_cmd = ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "json", in_path]
-        p_res = subprocess.run(probe_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        
-        orig_w, orig_h = 1080, 1920
-        try:
-            p_data = json.loads(p_res.stdout.decode("utf-8"))
-            s_info = p_data["streams"][0]
-            orig_w = int(s_info.get("width", 1080))
-            orig_h = int(s_info.get("height", 1920))
-        except Exception:
-            pass
-
-        # Calculate target 1080p scale maintaining aspect ratio (even dimensions required by H.264)
-        is_landscape = orig_w > orig_h
-        if is_landscape:
-            target_h = 1080
-            target_w = round((orig_w / orig_h) * target_h)
-            if target_w > 1920:
-                target_w = 1920
-                target_h = round((orig_h / orig_w) * target_w)
-        else:
-            target_w = 1080
-            target_h = round((orig_h / orig_w) * target_w)
-            if target_h > 1920:
-                target_h = 1920
-                target_w = round((orig_w / orig_h) * target_h)
-
-        target_w = target_w if target_w % 2 == 0 else target_w - 1
-        target_h = target_h if target_h % 2 == 0 else target_h - 1
-        target_w = max(2, target_w)
-        target_h = max(2, target_h)
-
-        # FFmpeg Real Downscale Encoding at Near-Lossless CRF 16 (preserves supreme quality + shrinks file size drastically)
         scale_filter = f"scale={target_w}:{target_h}:flags=lanczos"
         cmd_encode = [
             "ffmpeg", "-y", "-i", in_path,
@@ -696,25 +813,17 @@ def api_downscale_bypass():
         
         enc_res = subprocess.run(cmd_encode, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         if enc_res.returncode != 0 or not os.path.exists(encoded_path):
-            # Fallback to superfast preset if slow fails
             cmd_encode[cmd_encode.index("slow")] = "superfast"
             enc_res2 = subprocess.run(cmd_encode, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             if enc_res2.returncode != 0:
                 return jsonify({"error": "FFmpeg downscale failed: " + enc_res2.stderr.decode("utf-8", errors="ignore")[-300:]}), 500
 
-        # Apply exact binary bypass on the downscaled 1080p video
         apply_bypass_to_mp4_file(encoded_path, out_path, target_w, target_h)
         return send_file(out_path, mimetype="video/mp4", as_attachment=True, download_name="downscaled_bypassed.mp4")
 
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    except Exception as er:
+        return jsonify({"error": str(er)}), 500
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
-```[file-tag: code-generated-file-5bcf8e0c-8d19-4b6e-8272-bca4fbc9a800]
-
-### ယခု ကုဒ်အသစ်ရဲ့ အားသာချက်များ:
-* **Real 1080p Downscale (Lanczos scaler):** 4K/2K ဖိုင်များကို အချိုးကျကျ 1080p သို့ အစစ်အမှန် ပြောင်းလဲပေးသောကြောင့် ဖိုင်ဆိုဒ် အလွန်အမင်း သေးသွားပြီး TikTok တွင် `V7 BRIDGE TIMEOUT` Error လုံးဝ မတက်တော့ပါ။
-* **Near-Lossless Quality (CRF 16):** ရုပ်ထွက် အရည်အသွေး မကျစေရန် High-quality CRF 16 ကို သုံးပေးထားပြီး ကြည့်ရှုသူဘက်တွင် အကြည်ဓာတ် အပြည့်အဝ ထွက်လာမည် ဖြစ်သည်။
-* **Automatic Aspect Ratio Calculator:** အလျားလိုက် (`16:9`) ဖြစ်စေ၊ ဒေါင်လိုက် (`9:16`) ဖြစ်စေ အချိုးအစား လုံးဝ မပျက်စေဘဲ အလိုအလျောက် တွက်ချက် ချုံ့ပေးပါသည်။
