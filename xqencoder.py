@@ -300,7 +300,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 </svg>
             </div>
             <p class="upload-title" id="uploadTitle">Select file — click to upload</p>
-            <p class="upload-sub">MP4 — up to 1080p 60 FPS</p>
+            <p class="upload-sub">MP4 — Original Resolution Passthrough (Any px / FPS)</p>
         </div>
 
         <div class="file-meta" id="fileMeta">
@@ -466,7 +466,7 @@ async function detectMp4SpecsFromFile(file) {
             const v = document.createElement('video');
             v.preload = 'metadata';
             const url = URL.createObjectURL(file);
-            const timer = setTimeout(() => { URL.revokeObjectURL(url); resolve({ w: 0, h: 0 }); }, 2500);
+            const timer = setTimeout(() => { URL.revokeObjectURL(url); resolve({ w: 0, h: 0 }); }, 3500);
             v.onloadedmetadata = () => {
                 clearTimeout(timer);
                 const w = v.videoWidth || 0;
@@ -538,10 +538,10 @@ async function detectMp4SpecsFromFile(file) {
             }
         };
 
-        const headSize = Math.min(file.size, 2 * 1024 * 1024);
+        const headSize = Math.min(file.size, 8 * 1024 * 1024);
         await parseSlice(file.slice(0, headSize));
         if ((fps === 0 || width === 0) && file.size > headSize) {
-            const tailStart = Math.max(0, file.size - 2 * 1024 * 1024);
+            const tailStart = Math.max(0, file.size - 8 * 1024 * 1024);
             await parseSlice(file.slice(tailStart, file.size));
         }
     } catch (_) {}
@@ -613,6 +613,122 @@ function readBoxType(u8, off) {
     return String.fromCharCode(u8[off], u8[off + 1], u8[off + 2], u8[off + 3]);
 }
 
+// Deep Binary Search fallback if non-standard headers/padding prevent top-level box walk from finding moov/mdat
+async function deepFindBoxInChunk(file, boxFourCC, startOffset, endOffset) {
+    const c0 = boxFourCC.charCodeAt(0),
+          c1 = boxFourCC.charCodeAt(1),
+          c2 = boxFourCC.charCodeAt(2),
+          c3 = boxFourCC.charCodeAt(3);
+    const fileSize = file.size;
+    const CHUNK = 8 * 1024 * 1024;
+    let cur = Math.max(0, startOffset);
+    const limit = Math.min(fileSize, endOffset);
+
+    while (cur < limit) {
+        const sliceEnd = Math.min(limit, cur + CHUNK);
+        const ab = await file.slice(cur, sliceEnd).arrayBuffer();
+        const u8 = new Uint8Array(ab);
+        const view = new DataView(ab);
+
+        for (let i = 4; i <= u8.byteLength - 8; i++) {
+            if (u8[i] === c0 && u8[i+1] === c1 && u8[i+2] === c2 && u8[i+3] === c3) {
+                const boxStart = cur + i - 4;
+                let sz = view.getUint32(i - 4, false);
+                if (sz === 1 && i + 12 <= u8.byteLength) {
+                    const hi = view.getUint32(i + 4, false);
+                    const lo = view.getUint32(i + 8, false);
+                    sz = hi * 4294967296 + lo;
+                } else if (sz === 0) {
+                    sz = fileSize - boxStart;
+                }
+                if (sz >= 8 && boxStart + sz <= fileSize) {
+                    return { pos: boxStart, size: sz };
+                }
+            }
+        }
+        if (sliceEnd >= limit) break;
+        cur += CHUNK - 64;
+    }
+    return null;
+}
+
+async function locateMoovAndMdatRobust(file) {
+    const fileSize = file.size;
+    let pos = 0;
+    let moovPos = -1, moovSize = 0;
+    let mdatPos = -1, mdatSize = 0;
+
+    // 1. Standard Top-Level Box Walk (supports 32-bit and 64-bit extended size)
+    let safetySteps = 0;
+    while (pos + 8 <= fileSize && safetySteps < 10000) {
+        safetySteps++;
+        const hdrAb = await file.slice(pos, Math.min(fileSize, pos + 16)).arrayBuffer();
+        if (hdrAb.byteLength < 8) break;
+        const hdrView = new DataView(hdrAb);
+        const hdrU8 = new Uint8Array(hdrAb);
+        let sz = hdrView.getUint32(0, false);
+        const tp = readBoxType(hdrU8, 4);
+
+        if (sz === 1) {
+            if (hdrAb.byteLength < 16) break;
+            const hi = hdrView.getUint32(8, false);
+            const lo = hdrView.getUint32(12, false);
+            sz = hi * 4294967296 + lo;
+        } else if (sz === 0) {
+            sz = fileSize - pos;
+        }
+
+        // Check if box header is valid ASCII fourCC and size is valid
+        const validFourCC = /^[ -~]{4}$/.test(tp);
+        if (!validFourCC || sz < 8 || pos + sz > fileSize) {
+            break;
+        }
+
+        if (tp === "moov") {
+            moovPos = pos;
+            moovSize = sz;
+        } else if (tp === "mdat" && sz > mdatSize) {
+            mdatPos = pos;
+            mdatSize = sz;
+        }
+        pos += sz;
+    }
+
+    // 2. Deep Fallback Search if top-level walk missed moov or mdat (common in 2K/1440p files with padding/zeroes)
+    const TAIL_SCAN_BYTES = 32 * 1024 * 1024;
+    const HEAD_SCAN_BYTES = 32 * 1024 * 1024;
+
+    if (moovPos === -1) {
+        // Check first 32MB
+        let found = await deepFindBoxInChunk(file, "moov", 0, Math.min(fileSize, HEAD_SCAN_BYTES));
+        // Check last 32MB (where large files usually store moov)
+        if (!found && fileSize > HEAD_SCAN_BYTES) {
+            found = await deepFindBoxInChunk(file, "moov", Math.max(0, fileSize - TAIL_SCAN_BYTES), fileSize);
+        }
+        // Full scan if still not found
+        if (!found && fileSize > HEAD_SCAN_BYTES + TAIL_SCAN_BYTES) {
+            found = await deepFindBoxInChunk(file, "moov", HEAD_SCAN_BYTES, fileSize - TAIL_SCAN_BYTES);
+        }
+        if (found) {
+            moovPos = found.pos;
+            moovSize = found.size;
+        }
+    }
+
+    if (mdatPos === -1) {
+        let found = await deepFindBoxInChunk(file, "mdat", 0, Math.min(fileSize, HEAD_SCAN_BYTES));
+        if (!found && fileSize > HEAD_SCAN_BYTES) {
+            found = await deepFindBoxInChunk(file, "mdat", HEAD_SCAN_BYTES, fileSize);
+        }
+        if (found) {
+            mdatPos = found.pos;
+            mdatSize = found.size;
+        }
+    }
+
+    return { moovPos, moovSize, mdatPos, mdatSize };
+}
+
 function hasSubBox(u8, fourCC) {
     const c0 = fourCC.charCodeAt(0), c1 = fourCC.charCodeAt(1), c2 = fourCC.charCodeAt(2), c3 = fourCC.charCodeAt(3);
     for (let i = 0; i <= u8.byteLength - 4; i++) {
@@ -621,8 +737,30 @@ function hasSubBox(u8, fourCC) {
     return false;
 }
 
+function readBoxHeader(u8, view, pos, endPos) {
+    if (pos + 8 > endPos) return null;
+    let sz = view.getUint32(pos, false);
+    const tp = readBoxType(u8, pos + 4);
+    let hdrLen = 8;
+    if (sz === 1) {
+        if (pos + 16 > endPos) return null;
+        const hi = view.getUint32(pos + 8, false);
+        const lo = view.getUint32(pos + 12, false);
+        sz = hi * 4294967296 + lo;
+        hdrLen = 16;
+    } else if (sz === 0) {
+        sz = endPos - pos;
+    }
+    if (sz < hdrLen || pos + sz > endPos) return null;
+    return { size: sz, type: tp, hdrLen };
+}
+
 function rebuildBoxInBrowser(boxData, isVideoTrak, targetW, targetH) {
-    const btype = readBoxType(boxData, 4);
+    const rootView = new DataView(boxData.buffer, boxData.byteOffset, boxData.byteLength);
+    const rootHdr = readBoxHeader(boxData, rootView, 0, boxData.byteLength);
+    if (!rootHdr) return boxData;
+
+    const btype = rootHdr.type;
     if (btype === "trak") {
         isVideoTrak = hasSubBox(boxData, "vmhd");
     }
@@ -630,8 +768,8 @@ function rebuildBoxInBrowser(boxData, isVideoTrak, targetW, targetH) {
     if (btype === "tkhd") {
         const outTkhd = new Uint8Array(boxData);
         const view = new DataView(outTkhd.buffer, outTkhd.byteOffset, outTkhd.byteLength);
-        const ver = outTkhd[8];
-        const wOff = ver === 1 ? 96 : 84;
+        const ver = outTkhd[rootHdr.hdrLen];
+        const wOff = (rootHdr.hdrLen - 8) + (ver === 1 ? 96 : 84);
         if (wOff + 8 <= outTkhd.byteLength) {
             if (isVideoTrak) {
                 view.setUint32(wOff, (targetW << 16) >>> 0, false);
@@ -701,16 +839,15 @@ function rebuildBoxInBrowser(boxData, isVideoTrak, targetW, targetH) {
         return boxData;
     }
 
-    const view = new DataView(boxData.buffer, boxData.byteOffset, boxData.byteLength);
-    let cpos = 8;
+    let cpos = rootHdr.hdrLen;
     const cend = boxData.byteLength;
     const children = [];
     while (cpos + 8 <= cend) {
-        const csz = view.getUint32(cpos, false);
-        if (csz < 8 || cpos + csz > cend) break;
-        const childSlice = boxData.subarray(cpos, cpos + csz);
+        const ch = readBoxHeader(boxData, rootView, cpos, cend);
+        if (!ch) break;
+        const childSlice = boxData.subarray(cpos, cpos + ch.size);
         children.push(rebuildBoxInBrowser(childSlice, isVideoTrak, targetW, targetH));
-        cpos += csz;
+        cpos += ch.size;
     }
     const childrenBytes = concatBytes(children);
     return concatBytes([packU32BE(8 + childrenBytes.byteLength), asciiToBytes(btype), childrenBytes]);
@@ -721,11 +858,12 @@ function shiftStcoInBrowser(buf, start, endIdx, delta) {
     let cur = start;
     const containers = { "trak": 1, "mdia": 1, "minf": 1, "stbl": 1, "edts": 1, "dinf": 1 };
     while (cur + 8 <= endIdx) {
-        const bsz = view.getUint32(cur, false);
-        const btp = readBoxType(buf, cur + 4);
-        if (bsz < 8 || cur + bsz > endIdx) break;
+        const bh = readBoxHeader(buf, view, cur, endIdx);
+        if (!bh) break;
+        const bsz = bh.size;
+        const btp = bh.type;
         if (containers[btp]) {
-            shiftStcoInBrowser(buf, cur + 8, cur + bsz, delta);
+            shiftStcoInBrowser(buf, cur + bh.hdrLen, cur + bsz, delta);
         } else if (btp === "stco") {
             const cnt = view.getUint32(cur + 12, false);
             for (let k = 0; k < cnt; k++) {
@@ -738,13 +876,17 @@ function shiftStcoInBrowser(buf, start, endIdx, delta) {
             }
         } else if (btp === "co64") {
             const cnt = view.getUint32(cur + 12, false);
-            const bigDelta = BigInt(delta);
             for (let k = 0; k < cnt; k++) {
                 const op = cur + 16 + k * 8;
                 if (op + 8 <= cur + bsz) {
-                    const oldV = view.getBigUint64(op, false);
-                    const newV = oldV + bigDelta;
-                    view.setBigUint64(op, newV >= 0n ? newV : 0n, false);
+                    const hi = view.getUint32(op, false);
+                    const lo = view.getUint32(op + 4, false);
+                    const oldV = hi * 4294967296 + lo;
+                    const newV = Math.max(0, oldV + delta);
+                    const newHi = Math.floor(newV / 4294967296);
+                    const newLo = (newV % 4294967296) >>> 0;
+                    view.setUint32(op, newHi >>> 0, false);
+                    view.setUint32(op + 4, newLo, false);
                 }
             }
         }
@@ -767,38 +909,7 @@ async function startProcess() {
         await sleep(180);
 
         const fileSize = selectedFile.size;
-        let pos = 0;
-        let moovPos = -1, moovSize = 0;
-        let mdatPos = -1, mdatSize = 0;
-
-        // Scan top-level MP4 boxes using 16-byte slices (uses 0 MB RAM even on 1GB+ files!)
-        while (pos + 8 <= fileSize) {
-            const hdrAb = await selectedFile.slice(pos, Math.min(fileSize, pos + 16)).arrayBuffer();
-            if (hdrAb.byteLength < 8) break;
-            const hdrView = new DataView(hdrAb);
-            const hdrU8 = new Uint8Array(hdrAb);
-            let sz = hdrView.getUint32(0, false);
-            const tp = readBoxType(hdrU8, 4);
-
-            if (sz === 1) {
-                if (hdrAb.byteLength < 16) break;
-                sz = Number(hdrView.getBigUint64(8, false));
-            } else if (sz === 0) {
-                sz = fileSize - pos;
-            }
-            if (sz < 8 || pos + sz > fileSize) {
-                sz = fileSize - pos;
-            }
-
-            if (tp === "moov") {
-                moovPos = pos;
-                moovSize = sz;
-            } else if (tp === "mdat" && sz > mdatSize) {
-                mdatPos = pos;
-                mdatSize = sz;
-            }
-            pos += sz;
-        }
+        const { moovPos, moovSize, mdatPos, mdatSize } = await locateMoovAndMdatRobust(selectedFile);
 
         // STEP 2: READ (15% -> 45%)
         setStepperState('Reading File', 15, 2, '');
@@ -814,46 +925,24 @@ async function startProcess() {
         await sleep(200);
 
         // STEP 3: CONVERT (50% -> 82%)
-        // Auto Smart Routing:
-        // - 2K / 4K (> 1080p) -> High Quality 1000x2166 + Bypass
-        // - 1080p / 720p (<= 1080p, including 1440x1080) -> Auto 1080p, 60FPS + Bypass
-        const inW = detectedSpecs.width || 1080;
-        const inH = detectedSpecs.height || 1920;
-        const isLandscape = inW > inH;
-        const minDim = Math.min(inW, inH);
-        const maxDim = Math.max(inW, inH);
-        const isAlready1000x2166 = (inW === 1000 && inH === 2166) || (inW === 2166 && inH === 1000);
-        const is2kOr4k = (!isAlready1000x2166) && (minDim > 1088 || maxDim > 1928);
-
-        let targetW, targetH;
-        if (is2kOr4k) {
-            targetW = isLandscape ? 2166 : 1000;
-            targetH = isLandscape ? 1000 : 2166;
-        } else {
-            if ((inW === 1440 && inH === 1080) || (inW === 1080 && inH === 1440)) {
-                targetW = inW;
-                targetH = inH;
-            } else if (Math.abs((maxDim / Math.max(1, minDim)) - (4.0 / 3.0)) < 0.08) {
-                targetW = isLandscape ? 1440 : 1080;
-                targetH = isLandscape ? 1080 : 1440;
-            } else {
-                targetW = isLandscape ? 1920 : 1080;
-                targetH = isLandscape ? 1080 : 1920;
-            }
-        }
+        // Keep Original Resolution (Passthrough) instead of forcing fixed resolutions
+        const targetW = detectedSpecs.width || 1080;
+        const targetH = detectedSpecs.height || 1920;
 
         setStepperState('Converting Video', 65, 3, '');
         await sleep(250);
 
         const moovView = new DataView(moovBytes.buffer, moovBytes.byteOffset, moovBytes.byteLength);
-        let mpos = 8;
+        const moovRootHdr = readBoxHeader(moovBytes, moovView, 0, moovBytes.byteLength);
+        let mpos = moovRootHdr ? moovRootHdr.hdrLen : 8;
         const mend = moovBytes.byteLength;
         const newMoovChildrenList = [EXACT_MVHD_120B];
 
         while (mpos + 8 <= mend) {
-            const msz = moovView.getUint32(mpos, false);
-            const mtp = readBoxType(moovBytes, mpos + 4);
-            if (msz < 8 || mpos + msz > mend) break;
+            const mh = readBoxHeader(moovBytes, moovView, mpos, mend);
+            if (!mh) break;
+            const msz = mh.size;
+            const mtp = mh.type;
             if (mtp !== "mvhd" && mtp !== "udta") {
                 const boxSlice = moovBytes.subarray(mpos, mpos + msz);
                 newMoovChildrenList.push(rebuildBoxInBrowser(boxSlice, false, targetW, targetH));
@@ -871,7 +960,30 @@ async function startProcess() {
         const newMoovChildren = concatBytes(newMoovChildrenList);
         const newMoovSize = 8 + newMoovChildren.byteLength;
         const newMdatPos = EXACT_AVC1_FTYP_32B.byteLength + newMoovSize;
-        const delta = newMdatPos - mdatPos;
+
+        // Calculate offset delta based on mdat payload start so 32-bit/64-bit mdat header conversion never corrupts stco/co64 offsets
+        const mdatHdrAb = await selectedFile.slice(mdatPos, Math.min(fileSize, mdatPos + 16)).arrayBuffer();
+        const mdatHdrView = new DataView(mdatHdrAb);
+        const origMdatSizeField = mdatHdrAb.byteLength >= 4 ? mdatHdrView.getUint32(0, false) : 0;
+        const origMdatHdrLen = (origMdatSizeField === 1) ? 16 : 8;
+        const mdatPayloadPos = mdatPos + origMdatHdrLen;
+        const mdatPayloadSize = mdatSize - origMdatHdrLen;
+
+        let newMdatHdr;
+        if (mdatPayloadSize + 8 > 0xFFFFFFFF) {
+            newMdatHdr = new Uint8Array(16);
+            const mv = new DataView(newMdatHdr.buffer);
+            mv.setUint32(0, 1, false);
+            newMdatHdr.set(asciiToBytes("mdat"), 4);
+            const total64 = mdatPayloadSize + 16;
+            mv.setUint32(8, Math.floor(total64 / 4294967296) >>> 0, false);
+            mv.setUint32(12, (total64 % 4294967296) >>> 0, false);
+        } else {
+            newMdatHdr = concatBytes([packU32BE(mdatPayloadSize + 8), asciiToBytes("mdat")]);
+        }
+
+        const newMdatPayloadPos = newMdatPos + newMdatHdr.byteLength;
+        const delta = newMdatPayloadPos - mdatPayloadPos;
 
         if (delta !== 0) {
             shiftStcoInBrowser(newMoovChildren, 0, newMoovChildren.byteLength, delta);
@@ -879,12 +991,12 @@ async function startProcess() {
 
         const newMoovBox = concatBytes([packU32BE(newMoovSize), asciiToBytes("moov"), newMoovChildren]);
 
-        // Zero-Copy Blob assembly: combines 32B ftyp + rebuilt moov + direct disk slice of mdat!
-        const mdatSlice = selectedFile.slice(mdatPos, mdatPos + mdatSize);
-        const finalBlob = new Blob([EXACT_AVC1_FTYP_32B, newMoovBox, mdatSlice], { type: 'video/mp4' });
+        // Zero-Copy Blob assembly: combines 32B ftyp + rebuilt moov + clean mdat header + direct disk slice of mdat payload!
+        const mdatPayloadSlice = selectedFile.slice(mdatPayloadPos, mdatPayloadPos + mdatPayloadSize);
+        const finalBlob = new Blob([EXACT_AVC1_FTYP_32B, newMoovBox, newMdatHdr, mdatPayloadSlice], { type: 'video/mp4' });
 
         const baseName = (selectedFile.name || "video").replace(/\.[^/.]+$/, "");
-        const outFilename = `${baseName}_xuqingxinnocent_${targetW}x${targetH}_60fps.mp4`;
+        const outFilename = `${baseName}_xuqingxinnocent_${targetW}x${targetH}_${detectedSpecs.fps || 60}fps.mp4`;
 
         if (lastOutputBlobUrl) {
             try { URL.revokeObjectURL(lastOutputBlobUrl); } catch (_) {}
