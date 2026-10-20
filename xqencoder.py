@@ -300,7 +300,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 </svg>
             </div>
             <p class="upload-title" id="uploadTitle">Select file — click to upload</p>
-            <p class="upload-sub">MP4 / MOV / MKV / WebM — Original Resolution Passthrough</p>
+            <p class="upload-sub">Auto 1080p Aspect-Ratio Scale Calculator (HQ Bypass)</p>
         </div>
 
         <div class="file-meta" id="fileMeta">
@@ -407,7 +407,6 @@ function asciiToBytes(str) {
     return out;
 }
 
-// Universal File Slice Reader with FileReader Fallback (fixes Android/iOS WebView NotReadableError on 500MB+ files)
 async function readSliceBufferSafe(file, start, end) {
     const s = Math.max(0, start);
     const e = Math.min(file.size, end);
@@ -476,7 +475,6 @@ function buildAppleIlstUdta(methodName = "xuqingxinnocent") {
     return udtaBox;
 }
 
-// Fast client-side MP4 atom parser to detect exact FPS & Resolution
 async function detectMp4SpecsFromFile(file) {
     let width = 0, height = 0, fps = 0;
 
@@ -585,7 +583,6 @@ async function selectFile(file) {
     document.getElementById('metaFps').textContent = `${detectedSpecs.fps} FPS`;
 }
 
-// stepIdx: 1 = LOAD, 2 = READ, 3 = CONVERT, 4 = BYPASS, 5 = DONE
 function setStepperState(stageTitle, pct, stepIdx, detailText) {
     document.getElementById('statusCard').style.display = 'block';
     document.getElementById('stageText').textContent = stageTitle;
@@ -632,7 +629,6 @@ function readBoxType(u8, off) {
     return String.fromCharCode(u8[off], u8[off + 1], u8[off + 2], u8[off + 3]);
 }
 
-// Deep Binary Search fallback that tolerates trailing garbage bytes or slight size mismatches
 async function deepFindBoxInChunk(file, boxFourCC, startOffset, endOffset) {
     const c0 = boxFourCC.charCodeAt(0),
           c1 = boxFourCC.charCodeAt(1),
@@ -668,8 +664,6 @@ async function deepFindBoxInChunk(file, boxFourCC, startOffset, endOffset) {
                     sz = fileSize - boxStart;
                 }
 
-                // If moov, verify child box signature (mvhd/trak) so we never match random video bytes,
-                // and clamp size if file has slight truncation or trailing bytes!
                 if (boxFourCC === "moov" && i + hdrLen + 4 <= u8.byteLength) {
                     const subTp = readBoxType(u8, i - 4 + hdrLen + 4);
                     if (validSubBoxes.moov.includes(subTp)) {
@@ -700,18 +694,16 @@ async function locateMoovAndMdatRobust(file) {
     let moovPos = -1, moovSize = 0;
     let mdatPos = -1, mdatSize = 0;
 
-    // Check first 16 bytes to detect WebM/MKV (EBML 0x1A45DFA3) or MPEG-TS (0x47)
     const sigAb = await readSliceBufferSafe(file, 0, Math.min(64, fileSize));
     const sigU8 = new Uint8Array(sigAb);
     let isNonMp4Container = false;
     if (sigU8.byteLength >= 4) {
         if (sigU8[0] === 0x1A && sigU8[1] === 0x45 && sigU8[2] === 0xDF && sigU8[3] === 0xA3) {
-            isNonMp4Container = true; // MKV / WebM container disguised as .mp4
+            isNonMp4Container = true;
         }
     }
 
     if (!isNonMp4Container) {
-        // 1. Standard Top-Level Box Walk (supports 32-bit, 64-bit, zero-padding skip)
         let safetySteps = 0;
         while (pos + 8 <= fileSize && safetySteps < 15000) {
             safetySteps++;
@@ -722,7 +714,6 @@ async function locateMoovAndMdatRobust(file) {
             let sz = hdrView.getUint32(0, false);
             const tp = readBoxType(hdrU8, 4);
 
-            // Skip zero padding bytes between boxes
             if (sz === 0 && hdrU8[4] === 0 && hdrU8[5] === 0 && hdrU8[6] === 0 && hdrU8[7] === 0) {
                 pos += 4;
                 continue;
@@ -755,8 +746,7 @@ async function locateMoovAndMdatRobust(file) {
             pos += sz;
         }
 
-        // 2. Deep Fallback Search if top-level walk missed moov or mdat
-        const SCAN_WINDOW = 64 * 1024 * 1024; // 64MB head & tail scan
+        const SCAN_WINDOW = 64 * 1024 * 1024;
         if (moovPos === -1) {
             let found = await deepFindBoxInChunk(file, "moov", 0, Math.min(fileSize, SCAN_WINDOW));
             if (!found && fileSize > SCAN_WINDOW) {
@@ -771,7 +761,7 @@ async function locateMoovAndMdatRobust(file) {
         if (mdatPos === -1) {
             let found = await deepFindBoxInChunk(file, "mdat", 0, Math.min(fileSize, SCAN_WINDOW));
             if (!found && fileSize > SCAN_WINDOW) {
-                found = await deepFindBoxInChunk(file, "mdat", Math.max(0, fileSize - SCAN_WINDOW), fileSize);
+                found = await deepFindBoxInChunk(file, "mdat", SCAN_WINDOW, fileSize);
             }
             if (found) {
                 mdatPos = found.pos;
@@ -948,7 +938,50 @@ function shiftStcoInBrowser(buf, start, endIdx, delta) {
     }
 }
 
-// Server-side FFmpeg Zero-Loss Remux + Bypass Fallback when file is MKV/WebM/Fragmented MP4 (no moov/mdat)
+// Auto 1080p Aspect-Ratio Scale Calculator
+function calculateTargetResolution(w, h) {
+    if (!w || !h || w <= 0 || h <= 0) return { width: 1080, height: 1920 };
+
+    const isLandscape = w > h;
+    const maxEdge = Math.max(w, h);
+    const minEdge = Math.min(w, h);
+
+    // If already within 1080p bounds, keep original resolution
+    if (maxEdge <= 1920 && minEdge <= 1080) {
+        let sw = (w % 2 === 0) ? w : w - 1;
+        let sh = (h % 2 === 0) ? h : h - 1;
+        return { width: Math.max(2, sw), height: Math.max(2, sh) };
+    }
+
+    let targetW, targetH;
+    if (isLandscape) {
+        // Landscape: Short side (height) scaled to 1080p, maintaining aspect ratio
+        targetH = 1080;
+        targetW = Math.round((w / h) * targetH);
+        if (targetW > 1920) {
+            targetW = 1920;
+            targetH = Math.round((h / w) * targetW);
+        }
+    } else {
+        // Portrait: Short side (width) scaled to 1080p, maintaining aspect ratio
+        targetW = 1080;
+        targetH = Math.round((h / w) * targetW);
+        if (targetH > 1920) {
+            targetH = 1920;
+            targetW = Math.round((w / h) * targetH);
+        }
+    }
+
+    // Ensure even numbers (required by H.264 encoder / MP4 standards)
+    targetW = (targetW % 2 === 0) ? targetW : targetW - 1;
+    targetH = (targetH % 2 === 0) ? targetH : targetH - 1;
+
+    return {
+        width: Math.max(2, targetW),
+        height: Math.max(2, targetH)
+    };
+}
+
 async function processViaServerFallback(file, targetW, targetH, fps) {
     setStepperState('Reading File (Server Remux)', 28, 2, 'Remuxing container to standard MP4...');
     const formData = new FormData();
@@ -988,14 +1021,19 @@ async function startProcess() {
     startBtn.disabled = true;
 
     try {
-        // STEP 1: LOAD (0% -> 20%)
         setStepperState('Loading File', 8, 1, '');
         await sleep(180);
 
         const fileSize = selectedFile.size;
-        const targetW = detectedSpecs.width || 1080;
-        const targetH = detectedSpecs.height || 1920;
+        const origW = detectedSpecs.width || 1080;
+        const origH = detectedSpecs.height || 1920;
         const targetFps = detectedSpecs.fps || 60;
+
+        // Auto calculate target 1080p scale maintaining aspect ratio
+        const scaledRes = calculateTargetResolution(origW, origH);
+        const targetW = scaledRes.width;
+        const targetH = scaledRes.height;
+
         const baseName = (selectedFile.name || "video").replace(/\.[^/.]+$/, "");
         const outFilename = `${baseName}_xuqingxinnocent_${targetW}x${targetH}_${targetFps}fps.mp4`;
 
@@ -1003,12 +1041,9 @@ async function startProcess() {
 
         let finalBlob = null;
 
-        // If the 2560x1440 file is actually a WebM/MKV/Fragmented stream (which has no standard moov/mdat),
-        // automatically fall back to Server FFmpeg stream-copy remux + exact binary bypass!
         if (moovPos === -1 || mdatPos === -1 || isNonMp4Container) {
             finalBlob = await processViaServerFallback(selectedFile, targetW, targetH, targetFps);
         } else {
-            // STEP 2: READ (15% -> 45%)
             setStepperState('Reading File', 15, 2, '');
             await sleep(220);
 
@@ -1017,8 +1052,7 @@ async function startProcess() {
             setStepperState('Reading File', 42, 2, '');
             await sleep(200);
 
-            // STEP 3: CONVERT (50% -> 82%)
-            setStepperState('Converting Video', 65, 3, '');
+            setStepperState('Converting Video', 65, 3, `Aspect-ratio scale: ${origW}x${origH} ➔ ${targetW}x${targetH}`);
             await sleep(250);
 
             const moovView = new DataView(moovBytes.buffer, moovBytes.byteOffset, moovBytes.byteLength);
@@ -1039,7 +1073,6 @@ async function startProcess() {
                 mpos += msz;
             }
 
-            // STEP 4: BYPASS (85% -> 100%)
             setStepperState('Applying Bypass', 88, 4, '');
             await sleep(220);
 
@@ -1107,13 +1140,11 @@ async function startProcess() {
 </html>
 """
 
-# Exact Binary Bypass Constants in Python for Server-Side Fallback
 EXACT_AVC1_FTYP_32B = binascii.unhexlify("000000206674797069736f6d0000020069736f6d69736f32617663316d703431")
 EXACT_MVHD_120B = binascii.unhexlify("000000786d7668640100000000000000000000000000000000000000000003e8ffffffffffffffff0001000001000000000000000000000000010000000000000000000000000000000100000000000000000000000000004000000000000000000000000000000000000000000000000000000000000003")
 EXACT_COLR_19B = binascii.unhexlify("00000013636f6c726e636c7800010001000100")
 EXACT_PASP_16B = binascii.unhexlify("00000010706173700000000100000001")
 EXACT_BTRT_20B = binascii.unhexlify("00000014627472740000000001312d0001312d00")
-
 
 def build_apple_ilst_udta_py(method_name="xuqingxinnocent"):
     clean_name = (method_name or "xuqingxinnocent").strip()
@@ -1145,6 +1176,33 @@ def build_apple_ilst_udta_py(method_name="xuqingxinnocent"):
     udta_box = struct.pack(">I4s", 8 + len(meta_box), b"udta") + meta_box
     return udta_box
 
+def calculate_target_resolution_py(w, h):
+    if not w or not h or w <= 0 or h <= 0:
+        return 1080, 1920
+    is_landscape = w > h
+    max_edge = max(w, h)
+    min_edge = min(w, h)
+    if max_edge <= 1920 and min_edge <= 1080:
+        sw = w if w % 2 == 0 else w - 1
+        sh = h if h % 2 == 0 else h - 1
+        return max(2, sw), max(2, sh)
+
+    if is_landscape:
+        target_h = 1080
+        target_w = round((w / h) * target_h)
+        if target_w > 1920:
+            target_w = 1920
+            target_h = round((h / w) * target_w)
+    else:
+        target_w = 1080
+        target_h = round((h / w) * target_w)
+        if target_h > 1920:
+            target_h = 1920
+            target_w = round((w / h) * target_h)
+
+    target_w = target_w if target_w % 2 == 0 else target_w - 1
+    target_h = target_h if target_h % 2 == 0 else target_h - 1
+    return max(2, target_w), max(2, target_h)
 
 def rebuild_box_py(box_data, is_video_trak, target_w, target_h):
     if len(box_data) < 8:
@@ -1220,7 +1278,6 @@ def rebuild_box_py(box_data, is_video_trak, target_w, target_h):
     children_bytes = b"".join(children)
     return struct.pack(">I4s", 8 + len(children_bytes), btype) + children_bytes
 
-
 def shift_stco_py(buf, start, end_idx, delta):
     cur = start
     containers = (b"trak", b"mdia", b"minf", b"stbl", b"edts", b"dinf")
@@ -1253,7 +1310,6 @@ def shift_stco_py(buf, start, end_idx, delta):
                     new_v = max(0, old_v + delta)
                     struct.pack_into(">Q", buf, op, new_v)
         cur += bsz
-
 
 def apply_bypass_to_mp4_file(in_mp4_path, out_mp4_path, target_w, target_h):
     file_size = os.path.getsize(in_mp4_path)
@@ -1340,11 +1396,9 @@ def apply_bypass_to_mp4_file(in_mp4_path, out_mp4_path, target_w, target_h):
             fout.write(chunk)
             remaining -= len(chunk)
 
-
 @app.route("/", methods=["GET"])
 def index():
     return render_template_string(HTML_TEMPLATE)
-
 
 @app.route("/api/remux_bypass", methods=["POST"])
 def api_remux_bypass():
@@ -1352,8 +1406,10 @@ def api_remux_bypass():
         return jsonify({"error": "No video file uploaded"}), 400
 
     vfile = request.files["video"]
-    target_w = int(request.form.get("width", 1080) or 1080)
-    target_h = int(request.form.get("height", 1920) or 1920)
+    orig_w = int(request.form.get("width", 1080) or 1080)
+    orig_h = int(request.form.get("height", 1920) or 1920)
+
+    target_w, target_h = calculate_target_resolution_py(orig_w, orig_h)
 
     job_id = str(uuid.uuid4())
     job_dir = os.path.join(JOBS_DIR, job_id)
@@ -1366,7 +1422,6 @@ def api_remux_bypass():
     try:
         vfile.save(in_path)
 
-        # 1. Try lossless stream-copy remux first (0% quality loss, converts MKV/WebM/fMP4 -> standard MP4 with moov/mdat)
         cmd_copy = [
             "ffmpeg", "-y", "-i", in_path,
             "-map", "0:v:0", "-map", "0:a?",
@@ -1376,8 +1431,6 @@ def api_remux_bypass():
         ]
         res = subprocess.run(cmd_copy, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
-        # 2. If input video codec is VP9/AV1 inside WebM that cannot be copied directly into standard avc1/hvc1 MP4,
-        # transcode at near-lossless CRF 16 while preserving original resolution
         if res.returncode != 0 or not os.path.exists(remux_path) or os.path.getsize(remux_path) < 1024:
             cmd_hq = [
                 "ffmpeg", "-y", "-i", in_path,
@@ -1396,7 +1449,6 @@ def api_remux_bypass():
         return send_file(out_path, mimetype="video/mp4", as_attachment=True, download_name="bypassed.mp4")
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
