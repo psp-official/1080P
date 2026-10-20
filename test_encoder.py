@@ -361,6 +361,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         <div class="mode-section">
             <div class="mode-label">Select Processing Mode</div>
             <select id="modeSelect" class="mode-select">
+                <option value="clarity_boost">HQ Clarity Boost (Sharpen + Color + Bypass)</option>
                 <option value="downscale_4k">4K, 2K Encoding Downscale + Bypass</option>
                 <option value="passthrough_1080p">1080P + Bypass (No Downscale)</option>
                 <option value="all_bypass">All Video + Bypass (Original Resolution)</option>
@@ -1079,7 +1080,7 @@ async function startProcess() {
         const jobId = data.job_id;
         appendLog(`[SERVER] Job queued: ${jobId}`);
 
-        setStepperState('Converting & Downscaling', 30, 3, 'FFmpeg processing in progress...');
+        setStepperState('Converting & Enhancing', 30, 3, 'FFmpeg processing in progress...');
         let displayedCount = 0;
 
         logPollInterval = setInterval(async () => {
@@ -1094,7 +1095,7 @@ async function startProcess() {
                         displayedCount = lData.logs.length;
                     }
                     if (lData.progress) {
-                        setStepperState(lData.stage || 'Converting & Downscaling', lData.progress, lData.step || 3, lData.detail || '');
+                        setStepperState(lData.stage || 'Converting & Enhancing', lData.progress, lData.step || 3, lData.detail || '');
                     }
                     if (lData.status === 'completed') {
                         clearInterval(logPollInterval);
@@ -1158,7 +1159,7 @@ ZERO_32B = binascii.unhexlify("00" * 32)
 
 
 def build_apple_ilst_udta_py(method_name="xuqingxinnocent"):
-    clean_name = (method_name or "xuqingxinnocent").strip()
+    clean_name = (method_name or "xuqingxinnocent").trim() if hasattr(str, "trim") else (method_name or "xuqingxinnocent").strip()
     ver_name = clean_name if clean_name.endswith("-v2.0.0") else f"{clean_name}-v2.0.0"
     clean_bytes = clean_name.encode("utf-8")
     ver_bytes = ver_name.encode("utf-8")
@@ -1475,11 +1476,55 @@ def background_process_job(job_id, in_path, processed_path, out_path, mode, orig
         log(f"[INFO] Source resolution: {orig_w}x{orig_h}")
         target_w, target_h = orig_w, orig_h
 
-        if mode == "downscale_4k":
+        if mode == "clarity_boost":
+            target_w, target_h = calculate_target_resolution_py(orig_w, orig_h)
+            log(f"[INFO] HQ Clarity Boost: Denoising + CAS/Unsharp Sharpening + Micro-Contrast & Color Boost ({target_w}x{target_h})...")
+            # Primary filter chain with CAS (Contrast Adaptive Sharpening), hqdn3d denoise, unsharp mask, and subtle color/contrast boost
+            vf_primary = (
+                f"scale={target_w}:{target_h}:flags=lanczos,"
+                f"hqdn3d=1.2:1.2:4:4,"
+                f"cas=0.65,"
+                f"unsharp=5:5:0.85:3:3:0.0,"
+                f"eq=contrast=1.05:saturation=1.10:brightness=0.01"
+            )
+            cmd = [
+                "ffmpeg", "-y", "-i", in_path,
+                "-map", "0:v:0", "-map", "0:a?",
+                "-vf", vf_primary,
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "15",
+                "-pix_fmt", "yuv420p",
+                "-c:a", "aac", "-b:a", "192k",
+                "-movflags", "+faststart",
+                processed_path
+            ]
+            rc, err_tail = run_ffmpeg_with_live_logs(cmd, job_id, log)
+            if rc != 0:
+                # Fallback if older FFmpeg build doesn't have 'cas' filter compiled
+                log("[WARN] Retrying Clarity Boost with universal Unsharp + HQDN3D + Color chain...")
+                vf_fallback = (
+                    f"scale={target_w}:{target_h}:flags=lanczos,"
+                    f"hqdn3d=1.2:1.2:4:4,"
+                    f"unsharp=5:5:1.15:3:3:0.2,"
+                    f"eq=contrast=1.05:saturation=1.10:brightness=0.01"
+                )
+                cmd_fb = [
+                    "ffmpeg", "-y", "-i", in_path,
+                    "-map", "0:v:0", "-map", "0:a?",
+                    "-vf", vf_fallback,
+                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "15",
+                    "-pix_fmt", "yuv420p",
+                    "-c:a", "aac", "-b:a", "192k",
+                    "-movflags", "+faststart",
+                    processed_path
+                ]
+                rc2, err_tail2 = run_ffmpeg_with_live_logs(cmd_fb, job_id, log)
+                if rc2 != 0:
+                    raise RuntimeError(f"FFmpeg clarity boost error: {err_tail2[-250:]}")
+
+        elif mode == "downscale_4k":
             target_w, target_h = calculate_target_resolution_py(orig_w, orig_h)
             log(f"[INFO] Target 1080p aspect-ratio scale: {target_w}x{target_h}")
             scale_filter = f"scale={target_w}:{target_h}:flags=lanczos"
-            # Use 'veryfast' with CRF 16 so 1.5GB 4K files encode rapidly on cloud CPUs without losing quality
             cmd = [
                 "ffmpeg", "-y", "-i", in_path,
                 "-map", "0:v:0", "-map", "0:a?",
@@ -1576,7 +1621,7 @@ def api_process_video():
         return jsonify({"error": "No video file uploaded"}), 400
 
     vfile = request.files["video"]
-    mode = request.form.get("mode", "downscale_4k")
+    mode = request.form.get("mode", "clarity_boost")
     orig_w = int(request.form.get("width", 1080) or 1080)
     orig_h = int(request.form.get("height", 1920) or 1920)
 
@@ -1592,7 +1637,7 @@ def api_process_video():
 
     JOBS[job_id] = {
         "status": "processing",
-        "stage": "Converting & Downscaling",
+        "stage": "Converting & Enhancing",
         "step": 3,
         "progress": 30,
         "detail": "Starting FFmpeg...",
