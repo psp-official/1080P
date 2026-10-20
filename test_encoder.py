@@ -178,7 +178,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             cursor: pointer;
             box-shadow: 0 8px 28px rgba(255, 255, 255, 0.12);
             transition: opacity 0.2s ease, transform 0.15s ease;
-            margin-bottom: 22px;
+            margin-bottom: 16px;
         }
         .start-btn:active {
             transform: scale(0.99);
@@ -189,6 +189,28 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             cursor: not-allowed;
             box-shadow: none;
             transform: none;
+        }
+
+        /* Direct Native Download Button */
+        .dl-btn {
+            display: none;
+            width: 100%;
+            padding: 18px 24px;
+            border-radius: 20px;
+            border: 1px solid rgba(0, 230, 118, 0.4);
+            background: rgba(0, 230, 118, 0.14);
+            color: #00e676;
+            font-size: 16.5px;
+            font-weight: 700;
+            text-align: center;
+            text-decoration: none;
+            letter-spacing: 0.01em;
+            cursor: pointer;
+            margin-bottom: 22px;
+            transition: background 0.2s ease;
+        }
+        .dl-btn:hover {
+            background: rgba(0, 230, 118, 0.22);
         }
 
         /* 4-Step Progress Card */
@@ -376,6 +398,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     </div>
 
     <button class="start-btn" id="startBtn" onclick="startProcess()">Start Processing</button>
+    <a class="dl-btn" id="directDlBtn" href="#" target="_blank">⬇ Click Here if Download Didn't Start</a>
 
     <div class="status-card" id="statusCard">
         <div class="status-top">
@@ -426,6 +449,7 @@ let logPollInterval = null;
 const videoInput = document.getElementById('videoInput');
 const dropZone = document.getElementById('dropZone');
 const modeSelect = document.getElementById('modeSelect');
+const directDlBtn = document.getElementById('directDlBtn');
 
 videoInput.addEventListener('change', (e) => {
     if (e.target.files && e.target.files[0]) selectFile(e.target.files[0]);
@@ -642,6 +666,7 @@ async function detectMp4SpecsFromFile(file) {
 
 async function selectFile(file) {
     selectedFile = file;
+    directDlBtn.style.display = 'none';
     document.getElementById('uploadTitle').textContent = 'Selected file — click to replace';
     document.getElementById('fileMeta').style.display = 'block';
     document.getElementById('metaSize').textContent = formatBytesMB(file.size);
@@ -1012,6 +1037,7 @@ async function startProcess() {
 
     const startBtn = document.getElementById('startBtn');
     startBtn.disabled = true;
+    directDlBtn.style.display = 'none';
     document.getElementById('logContainer').innerHTML = '';
 
     const selectedMode = modeSelect.value;
@@ -1094,36 +1120,32 @@ async function startProcess() {
                         }
                         displayedCount = lData.logs.length;
                     }
-                    if (lData.progress) {
+                    if (lData.progress && lData.status !== 'completed') {
                         setStepperState(lData.stage || 'Converting & Enhancing', lData.progress, lData.step || 3, lData.detail || '');
                     }
                     if (lData.status === 'completed') {
                         clearInterval(logPollInterval);
-                        setStepperState('Applying Bypass', 95, 4, 'Downloading output file...');
-                        await sleep(250);
+                        const baseName = (selectedFile.name || "video").replace(/\.[^/.]+$/, "");
+                        const outFilename = `${baseName}_${selectedMode}_bypassed.mp4`;
+                        const directUrl = `/api/download/${jobId}?filename=${encodeURIComponent(outFilename)}`;
 
-                        const dResp = await fetch(`/api/download/${jobId}`);
-                        if (dResp.ok) {
-                            const blob = await dResp.blob();
-                            const baseName = (selectedFile.name || "video").replace(/\.[^/.]+$/, "");
-                            const outFilename = `${baseName}_${selectedMode}_bypassed.mp4`;
+                        // Native Browser Stream Download (No fetch().blob() RAM hang on 200MB-500MB files!)
+                        appendLog(`[DOWNLOAD] Starting direct browser stream download (${outFilename})...`);
+                        setStepperState('Completed', 100, 5, `Download started: ${outFilename}`);
 
-                            if (lastOutputBlobUrl) URL.revokeObjectURL(lastOutputBlobUrl);
-                            lastOutputBlobUrl = URL.createObjectURL(blob);
+                        directDlBtn.href = directUrl;
+                        directDlBtn.download = outFilename;
+                        directDlBtn.style.display = 'block';
 
-                            const a = document.createElement('a');
-                            a.style.display = 'none';
-                            a.href = lastOutputBlobUrl;
-                            a.download = outFilename;
-                            document.body.appendChild(a);
-                            a.click();
-                            setTimeout(() => a.remove(), 3000);
+                        const a = document.createElement('a');
+                        a.style.display = 'none';
+                        a.href = directUrl;
+                        a.download = outFilename;
+                        document.body.appendChild(a);
+                        a.click();
+                        setTimeout(() => a.remove(), 3000);
 
-                            setStepperState('Completed', 100, 5, outFilename);
-                            startBtn.disabled = false;
-                        } else {
-                            throw new Error("Failed to download processed file");
-                        }
+                        startBtn.disabled = false;
                     } else if (lData.status === 'error') {
                         clearInterval(logPollInterval);
                         setStepperState('Error', 0, 1, lData.error || "Processing failed on server");
@@ -1159,7 +1181,7 @@ ZERO_32B = binascii.unhexlify("00" * 32)
 
 
 def build_apple_ilst_udta_py(method_name="xuqingxinnocent"):
-    clean_name = (method_name or "xuqingxinnocent").trim() if hasattr(str, "trim") else (method_name or "xuqingxinnocent").strip()
+    clean_name = (method_name or "xuqingxinnocent").strip()
     ver_name = clean_name if clean_name.endswith("-v2.0.0") else f"{clean_name}-v2.0.0"
     clean_bytes = clean_name.encode("utf-8")
     ver_bytes = ver_name.encode("utf-8")
@@ -1455,13 +1477,15 @@ def background_process_job(job_id, in_path, processed_path, out_path, mode, orig
             if job_id in JOBS:
                 JOBS[job_id]["logs"].append(msg)
 
-        log(f"[INFO] Job {job_id[:8]} started (Mode: {mode})")
+        in_size_mb = os.path.getsize(in_path) / (1024 * 1024)
+        log(f"[INFO] Job {job_id[:8]} started (Mode: {mode}, Input: {in_size_mb:.2f} MB)")
 
-        # Probe actual dimensions via ffprobe if available
+        # Probe actual dimensions and bitrate via ffprobe so output never balloons larger than input
+        in_bitrate = 0
         try:
             probe_cmd = [
                 "ffprobe", "-v", "error", "-select_streams", "v:0",
-                "-show_entries", "stream=width,height", "-of", "json", in_path
+                "-show_entries", "stream=width,height,bit_rate:format=bit_rate", "-of", "json", in_path
             ]
             p_res = subprocess.run(probe_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             if p_res.returncode == 0:
@@ -1470,16 +1494,25 @@ def background_process_job(job_id, in_path, processed_path, out_path, mode, orig
                 if streams:
                     orig_w = int(streams[0].get("width", orig_w) or orig_w)
                     orig_h = int(streams[0].get("height", orig_h) or orig_h)
+                    if streams[0].get("bit_rate"):
+                        in_bitrate = int(streams[0].get("bit_rate"))
+                if not in_bitrate and p_data.get("format", {}).get("bit_rate"):
+                    in_bitrate = int(p_data["format"]["bit_rate"])
         except Exception:
             pass
 
         log(f"[INFO] Source resolution: {orig_w}x{orig_h}")
         target_w, target_h = orig_w, orig_h
 
+        # Smart maxrate cap so Clarity Boost / Downscale never bloats a 255MB file to 414MB!
+        maxrate_kbps = 10000
+        if in_bitrate > 0:
+            maxrate_kbps = max(4500, min(12000, int((in_bitrate / 1000) * 1.05)))
+        bufsize_kbps = maxrate_kbps * 2
+
         if mode == "clarity_boost":
             target_w, target_h = calculate_target_resolution_py(orig_w, orig_h)
-            log(f"[INFO] HQ Clarity Boost: Denoising + CAS/Unsharp Sharpening + Micro-Contrast & Color Boost ({target_w}x{target_h})...")
-            # Primary filter chain with CAS (Contrast Adaptive Sharpening), hqdn3d denoise, unsharp mask, and subtle color/contrast boost
+            log(f"[INFO] HQ Clarity Boost: Denoising + CAS/Unsharp Sharpening + Color Boost ({target_w}x{target_h}, cap: {maxrate_kbps}k)...")
             vf_primary = (
                 f"scale={target_w}:{target_h}:flags=lanczos,"
                 f"hqdn3d=1.2:1.2:4:4,"
@@ -1491,7 +1524,8 @@ def background_process_job(job_id, in_path, processed_path, out_path, mode, orig
                 "ffmpeg", "-y", "-i", in_path,
                 "-map", "0:v:0", "-map", "0:a?",
                 "-vf", vf_primary,
-                "-c:v", "libx264", "-preset", "veryfast", "-crf", "15",
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+                "-maxrate", f"{maxrate_kbps}k", "-bufsize", f"{bufsize_kbps}k",
                 "-pix_fmt", "yuv420p",
                 "-c:a", "aac", "-b:a", "192k",
                 "-movflags", "+faststart",
@@ -1499,7 +1533,6 @@ def background_process_job(job_id, in_path, processed_path, out_path, mode, orig
             ]
             rc, err_tail = run_ffmpeg_with_live_logs(cmd, job_id, log)
             if rc != 0:
-                # Fallback if older FFmpeg build doesn't have 'cas' filter compiled
                 log("[WARN] Retrying Clarity Boost with universal Unsharp + HQDN3D + Color chain...")
                 vf_fallback = (
                     f"scale={target_w}:{target_h}:flags=lanczos,"
@@ -1511,7 +1544,8 @@ def background_process_job(job_id, in_path, processed_path, out_path, mode, orig
                     "ffmpeg", "-y", "-i", in_path,
                     "-map", "0:v:0", "-map", "0:a?",
                     "-vf", vf_fallback,
-                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "15",
+                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+                    "-maxrate", f"{maxrate_kbps}k", "-bufsize", f"{bufsize_kbps}k",
                     "-pix_fmt", "yuv420p",
                     "-c:a", "aac", "-b:a", "192k",
                     "-movflags", "+faststart",
@@ -1529,13 +1563,14 @@ def background_process_job(job_id, in_path, processed_path, out_path, mode, orig
                 "ffmpeg", "-y", "-i", in_path,
                 "-map", "0:v:0", "-map", "0:a?",
                 "-vf", scale_filter,
-                "-c:v", "libx264", "-preset", "veryfast", "-crf", "16",
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+                "-maxrate", "12000k", "-bufsize", "24000k",
                 "-pix_fmt", "yuv420p",
                 "-c:a", "aac", "-b:a", "192k",
                 "-movflags", "+faststart",
                 processed_path
             ]
-            log(f"[INFO] Encoding {orig_w}x{orig_h} -> {target_w}x{target_h} (CRF 16 Lanczos)...")
+            log(f"[INFO] Encoding {orig_w}x{orig_h} -> {target_w}x{target_h} (CRF 18 Lanczos)...")
             rc, err_tail = run_ffmpeg_with_live_logs(cmd, job_id, log)
             if rc != 0:
                 log("[WARN] Retrying with ultrafast preset...")
@@ -1556,11 +1591,11 @@ def background_process_job(job_id, in_path, processed_path, out_path, mode, orig
             ]
             rc, err_tail = run_ffmpeg_with_live_logs(cmd, job_id, log)
             if rc != 0 or not os.path.exists(processed_path) or os.path.getsize(processed_path) < 1024:
-                log("[WARN] Stream copy not compatible, transcoding at CRF 16...")
+                log("[WARN] Stream copy not compatible, transcoding at CRF 18...")
                 cmd_tr = [
                     "ffmpeg", "-y", "-i", in_path,
                     "-map", "0:v:0", "-map", "0:a?",
-                    "-c:v", "libx264", "-preset", "superfast", "-crf", "16",
+                    "-c:v", "libx264", "-preset", "superfast", "-crf", "18",
                     "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k",
                     "-movflags", "+faststart", processed_path
                 ]
@@ -1580,17 +1615,24 @@ def background_process_job(job_id, in_path, processed_path, out_path, mode, orig
             ]
             rc, err_tail = run_ffmpeg_with_live_logs(cmd, job_id, log)
             if rc != 0 or not os.path.exists(processed_path) or os.path.getsize(processed_path) < 1024:
-                log("[WARN] Non-MP4 codec detected, transcoding at CRF 16...")
+                log("[WARN] Non-MP4 codec detected, transcoding at CRF 18...")
                 cmd_hq = [
                     "ffmpeg", "-y", "-i", in_path,
                     "-map", "0:v:0", "-map", "0:a?",
-                    "-c:v", "libx264", "-preset", "superfast", "-crf", "16",
+                    "-c:v", "libx264", "-preset", "superfast", "-crf", "18",
                     "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k",
                     "-movflags", "+faststart", processed_path
                 ]
                 rc2, err_tail2 = run_ffmpeg_with_live_logs(cmd_hq, job_id, log)
                 if rc2 != 0:
                     raise RuntimeError(f"FFmpeg fallback failed: {err_tail2[-250:]}")
+
+        # Free disk space immediately by removing raw input_video before creating final.mp4
+        try:
+            if os.path.exists(in_path):
+                os.remove(in_path)
+        except Exception:
+            pass
 
         if job_id in JOBS:
             JOBS[job_id]["stage"] = "Applying Bypass"
@@ -1599,6 +1641,14 @@ def background_process_job(job_id, in_path, processed_path, out_path, mode, orig
 
         log(f"[INFO] Applying exact binary bypass ({target_w}x{target_h})...")
         apply_bypass_to_mp4_file(processed_path, out_path, target_w, target_h)
+
+        # Free disk space by removing intermediate processed.mp4
+        try:
+            if os.path.exists(processed_path):
+                os.remove(processed_path)
+        except Exception:
+            pass
+
         out_mb = os.path.getsize(out_path) / (1024 * 1024)
         log(f"[SUCCESS] Bypass complete! Output size: {out_mb:.2f} MB")
 
@@ -1619,6 +1669,17 @@ def background_process_job(job_id, in_path, processed_path, out_path, mode, orig
 def api_process_video():
     if "video" not in request.files:
         return jsonify({"error": "No video file uploaded"}), 400
+
+    # Clean up old job folders (>20 mins old) so /tmp never fills up on Render
+    try:
+        now_ts = time.time()
+        for dname in os.listdir(JOBS_DIR):
+            dpath = os.path.join(JOBS_DIR, dname)
+            if os.path.isdir(dpath) and (now_ts - os.path.getmtime(dpath)) > 1200:
+                shutil.rmtree(dpath, ignore_errors=True)
+                JOBS.pop(dname, None)
+    except Exception:
+        pass
 
     vfile = request.files["video"]
     mode = request.form.get("mode", "clarity_boost")
@@ -1673,12 +1734,13 @@ def api_job_status(job_id):
 
 @app.route("/api/download/<job_id>", methods=["GET"])
 def api_download(job_id):
-    if job_id not in JOBS or JOBS[job_id]["status"] != "completed":
-        return jsonify({"error": "File not ready"}), 400
-    out_path = JOBS[job_id]["out_path"]
+    out_path = os.path.join(JOBS_DIR, job_id, "final.mp4")
+    if job_id in JOBS and JOBS[job_id].get("out_path"):
+        out_path = JOBS[job_id]["out_path"]
     if not os.path.exists(out_path):
-        return jsonify({"error": "File missing"}), 404
-    return send_file(out_path, mimetype="video/mp4", as_attachment=True, download_name="bypassed_video.mp4")
+        return jsonify({"error": "File missing or expired"}), 404
+    custom_name = request.args.get("filename", "bypassed_video.mp4")
+    return send_file(out_path, mimetype="video/mp4", as_attachment=True, download_name=custom_name)
 
 
 if __name__ == "__main__":
