@@ -17,4 +17,4 @@ ENV PORT=5000
 EXPOSE 5000
 
 # Run the application using gunicorn or python
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--timeout", "300", "xqencoder:app"]
+CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--timeout", "300", "test_encoder:app"]
