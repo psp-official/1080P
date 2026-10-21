@@ -383,10 +383,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         <div class="mode-section">
             <div class="mode-label">Select Processing Mode</div>
             <select id="modeSelect" class="mode-select">
-                <option value="clarity_boost">HQ Qᴜᴀʟɪᴛʏ Bᴏᴏsᴛ (Sʜᴀʀᴘᴇɴ + Cᴏʟᴏʀ)</option>
-                <option value="downscale_4k">𝟺K, 𝟸K Eɴᴄᴏᴅɪɴɢ Dᴏᴡɴsᴄᴀʟᴇ</option>
-                <option value="passthrough_1080p">1080P</option>
-                <option value="all_bypass">Aʟʟ Rᴇsᴏʟᴜᴛɪᴏɴ Sᴜᴘᴘᴏʀᴛ</option>
+                <option value="clarity_boost">𝐇𝐐 𝐐𝐮𝐚𝐥𝐢𝐭𝐲 𝐁𝐨𝐨𝐬𝐭 (𝐒𝐡𝐚𝐫𝐩𝐞𝐧 + 𝐂𝐨𝐥𝐨𝐫)</option>
+                <option value="downscale_4k">𝟒𝐊, 𝟐𝐊 𝐄𝐧𝐜𝐨𝐝𝐢𝐧𝐠 𝐃𝐨𝐰𝐧𝐬𝐜𝐚𝐥𝐞</option>
+                <option value="passthrough_1080p">𝟏𝟎𝟖𝟎𝐏</option>
+                <option value="all_bypass">𝐀𝐥𝐥 𝐑𝐞𝐬𝐨𝐥𝐮𝐭𝐢𝐨𝐧 𝐒𝐮𝐩𝐩𝐨𝐫𝐭</option>
             </select>
         </div>
 
@@ -1581,7 +1581,7 @@ def background_process_job(job_id, in_path, processed_path, out_path, mode, orig
 
         elif mode == "passthrough_1080p":
             target_w, target_h = calculate_target_resolution_py(orig_w, orig_h)
-            log(f"[INFO] 1080P + Bypass mode: Stream copy remux (Header: {target_w}x{target_h})...")
+            log(f"[INFO] 𝟏𝟎𝟖𝟎𝐏: Stream copy remux (Header: {target_w}x{target_h})...")
             cmd = [
                 "ffmpeg", "-y", "-i", in_path,
                 "-map", "0:v:0", "-map", "0:a?",
@@ -1605,7 +1605,7 @@ def background_process_job(job_id, in_path, processed_path, out_path, mode, orig
 
         elif mode == "all_bypass":
             target_w, target_h = orig_w, orig_h
-            log(f"[INFO] All Video + Bypass: Keeping original resolution {target_w}x{target_h}...")
+            log(f"[INFO] 𝐀𝐥𝐥 𝐑𝐞𝐬𝐨𝐥𝐮𝐭𝐢𝐨𝐧 𝐒𝐮𝐩𝐩𝐨𝐫𝐭: Keeping original resolution {target_w}x{target_h}...")
             cmd = [
                 "ffmpeg", "-y", "-i", in_path,
                 "-map", "0:v:0", "-map", "0:a?",
