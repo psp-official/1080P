@@ -383,10 +383,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         <div class="mode-section">
             <div class="mode-label">Select Processing Mode</div>
             <select id="modeSelect" class="mode-select">
-                <option value="clarity_boost">𝐇𝐐 𝐐𝐮𝐚𝐥𝐢𝐭𝐲 𝐁𝐨𝐨𝐬𝐭 (𝐒𝐡𝐚𝐫𝐩𝐞𝐧 + 𝐂𝐨𝐥𝐨𝐫)</option>
-                <option value="downscale_4k">𝟒𝐊, 𝟐𝐊 𝐄𝐧𝐜𝐨𝐝𝐢𝐧𝐠 𝐃𝐨𝐰𝐧𝐬𝐜𝐚𝐥𝐞</option>
-                <option value="passthrough_1080p">𝟏𝟎𝟖𝟎𝐏</option>
-                <option value="all_bypass">𝐀𝐥𝐥 𝐑𝐞𝐬𝐨𝐥𝐮𝐭𝐢𝐨𝐧 𝐒𝐮𝐩𝐩𝐨𝐫𝐭</option>
+                <option value="hdr_hlg_flag">True HLG/HDR10 Color Flag + Bypass (Instant HDR)</option>
+                <option value="clarity_boost">HQ Clarity Boost (Sharpen + Color + Bypass)</option>
+                <option value="downscale_4k">4K, 2K Encoding Downscale + Bypass</option>
+                <option value="passthrough_1080p">1080P + Bypass (No Downscale)</option>
+                <option value="all_bypass">All Video + Bypass (Original Resolution)</option>
             </select>
         </div>
 
@@ -522,6 +523,8 @@ async function readSliceBufferSafe(file, start, end) {
 const EXACT_AVC1_FTYP_32B = hexToBytes("000000206674797069736f6d0000020069736f6d69736f32617663316d703431");
 const EXACT_MVHD_120B = hexToBytes("000000786d7668640100000000000000000000000000000000000000000003e8ffffffffffffffff0001000001000000000000000000000000010000000000000000000000000000000100000000000000000000000000004000000000000000000000000000000000000000000000000000000000000003");
 const EXACT_COLR_19B = hexToBytes("00000013636f6c726e636c7800010001000100");
+// True HLG/HDR10 Rec.2020 Color Atom: Primaries=9 (BT.2020), Transfer=18 (ARIB-STD-B67 HLG), Matrix=9 (BT.2020 NCL)
+const EXACT_COLR_HLG_19B = hexToBytes("00000013636f6c726e636c7800090012000900");
 const EXACT_PASP_16B = hexToBytes("00000010706173700000000100000001");
 const EXACT_BTRT_20B = hexToBytes("00000014627472740000000001312d0001312d00");
 
@@ -783,7 +786,7 @@ function readBoxHeader(u8, view, pos, endPos) {
     return { size: sz, type: tp, hdrLen };
 }
 
-function rebuildBoxInBrowser(boxData, isVideoTrak, targetW, targetH) {
+function rebuildBoxInBrowser(boxData, isVideoTrak, targetW, targetH, useHdrFlag = false) {
     const rootView = new DataView(boxData.buffer, boxData.byteOffset, boxData.byteLength);
     const rootHdr = readBoxHeader(boxData, rootView, 0, boxData.byteLength);
     if (!rootHdr) return boxData;
@@ -837,7 +840,8 @@ function rebuildBoxInBrowser(boxData, isVideoTrak, targetW, targetH) {
                     hdrView.setUint16(34, targetH, false);
                     for (let z = 50; z < 82; z++) avc1Hdr[z] = 0;
 
-                    const avc1Children = concatBytes([avccBox, EXACT_COLR_19B, EXACT_PASP_16B, btrtBox]);
+                    const colrAtom = useHdrFlag ? EXACT_COLR_HLG_19B : EXACT_COLR_19B;
+                    const avc1Children = concatBytes([avccBox, colrAtom, EXACT_PASP_16B, btrtBox]);
                     const avc1Size = 86 + avc1Children.byteLength;
                     hdrView.setUint32(0, avc1Size >>> 0, false);
 
@@ -857,6 +861,18 @@ function rebuildBoxInBrowser(boxData, isVideoTrak, targetW, targetH) {
                     stsdView.setUint16(16 + 32, targetW, false);
                     stsdView.setUint16(16 + 34, targetH, false);
                 }
+                if (useHdrFlag) {
+                    // Patch existing colr nclx atom inside hvc1/hev1 if present
+                    for (let k = 16; k <= outStsd.byteLength - 15; k++) {
+                        if (outStsd[k] === 0x63 && outStsd[k+1] === 0x6F && outStsd[k+2] === 0x6C && outStsd[k+3] === 0x72 &&
+                            outStsd[k+4] === 0x6E && outStsd[k+5] === 0x63 && outStsd[k+6] === 0x6C && outStsd[k+7] === 0x78) {
+                            outStsd[k+8] = 0x00; outStsd[k+9] = 0x09;   // BT.2020 Primaries
+                            outStsd[k+10] = 0x00; outStsd[k+11] = 0x12; // HLG Transfer (18)
+                            outStsd[k+12] = 0x00; outStsd[k+13] = 0x09; // BT.2020 Matrix
+                            break;
+                        }
+                    }
+                }
                 return outStsd;
             }
         }
@@ -874,7 +890,7 @@ function rebuildBoxInBrowser(boxData, isVideoTrak, targetW, targetH) {
         const ch = readBoxHeader(boxData, rootView, cpos, cend);
         if (!ch) break;
         const childSlice = boxData.subarray(cpos, cpos + ch.size);
-        children.push(rebuildBoxInBrowser(childSlice, isVideoTrak, targetW, targetH));
+        children.push(rebuildBoxInBrowser(childSlice, isVideoTrak, targetW, targetH, useHdrFlag));
         cpos += ch.size;
     }
     const childrenBytes = concatBytes(children);
@@ -954,7 +970,7 @@ async function locateMoovAndMdatClient(file) {
     return { moovPos, moovSize, mdatPos, mdatSize };
 }
 
-async function tryFastClientSideBypass(file, targetW, targetH) {
+async function tryFastClientSideBypass(file, targetW, targetH, useHdrFlag = false) {
     appendLog(`[CLIENT] Scanning MP4 atoms locally (zero-upload fast path)...`);
     const { moovPos, moovSize, mdatPos, mdatSize } = await locateMoovAndMdatClient(file);
     if (moovPos === -1 || mdatPos === -1) {
@@ -983,7 +999,7 @@ async function tryFastClientSideBypass(file, targetW, targetH) {
         if (!mh) break;
         if (mh.type !== "mvhd" && mh.type !== "udta") {
             const boxSlice = moovBytes.subarray(mpos, mpos + mh.size);
-            newMoovChildrenList.push(rebuildBoxInBrowser(boxSlice, false, targetW, targetH));
+            newMoovChildrenList.push(rebuildBoxInBrowser(boxSlice, false, targetW, targetH, useHdrFlag));
         }
         mpos += mh.size;
     }
@@ -1050,13 +1066,17 @@ async function startProcess() {
     appendLog(`[INFO] Input: ${origW}x${origH} @ ${fps}fps (${formatBytesMB(selectedFile.size)})`);
 
     try {
-        // Fast Client-Side Path for passthrough_1080p and all_bypass (if valid MP4)
-        if (selectedMode === 'passthrough_1080p' || selectedMode === 'all_bypass') {
-            const targetRes = (selectedMode === 'passthrough_1080p')
+        // Fast Client-Side Path for hdr_hlg_flag, passthrough_1080p, and all_bypass (if valid MP4)
+        if (selectedMode === 'hdr_hlg_flag' || selectedMode === 'passthrough_1080p' || selectedMode === 'all_bypass') {
+            const targetRes = (selectedMode === 'passthrough_1080p' || selectedMode === 'hdr_hlg_flag')
                 ? calculateTargetResolution(origW, origH)
                 : { width: origW, height: origH };
+            const useHdrFlag = (selectedMode === 'hdr_hlg_flag');
+            if (useHdrFlag) {
+                appendLog(`[HDR] Injecting True Rec.2020 HLG/HDR10 Color Flag (0009 0012 0009)...`);
+            }
 
-            const fastBlob = await tryFastClientSideBypass(selectedFile, targetRes.width, targetRes.height);
+            const fastBlob = await tryFastClientSideBypass(selectedFile, targetRes.width, targetRes.height, useHdrFlag);
             if (fastBlob) {
                 const baseName = (selectedFile.name || "video").replace(/\.[^/.]+$/, "");
                 const outFilename = `${baseName}_xuqingxinnocent_${targetRes.width}x${targetRes.height}_${fps}fps.mp4`;
@@ -1174,6 +1194,7 @@ async function startProcess() {
 EXACT_AVC1_FTYP_32B = binascii.unhexlify("000000206674797069736f6d0000020069736f6d69736f32617663316d703431")
 EXACT_MVHD_120B = binascii.unhexlify("000000786d7668640100000000000000000000000000000000000000000003e8ffffffffffffffff0001000001000000000000000000000000010000000000000000000000000000000100000000000000000000000000004000000000000000000000000000000000000000000000000000000000000003")
 EXACT_COLR_19B = binascii.unhexlify("00000013636f6c726e636c7800010001000100")
+EXACT_COLR_HLG_19B = binascii.unhexlify("00000013636f6c726e636c7800090012000900")
 EXACT_PASP_16B = binascii.unhexlify("00000010706173700000000100000001")
 EXACT_BTRT_20B = binascii.unhexlify("00000014627472740000000001312d0001312d00")
 ZERO_4B = binascii.unhexlify("00000000")
@@ -1240,7 +1261,7 @@ def calculate_target_resolution_py(w, h):
     return max(2, target_w), max(2, target_h)
 
 
-def rebuild_box_py(box_data, is_video_trak, target_w, target_h):
+def rebuild_box_py(box_data, is_video_trak, target_w, target_h, use_hdr_flag=False):
     if len(box_data) < 8:
         return box_data
     sz, btype = struct.unpack(">I4s", box_data[:8])
@@ -1283,7 +1304,8 @@ def rebuild_box_py(box_data, is_video_trak, target_w, target_h):
                 avc1_hdr = bytearray(box_data[16:16 + 86])
                 struct.pack_into(">HH", avc1_hdr, 32, target_w, target_h)
                 avc1_hdr[50:82] = ZERO_32B
-                avc1_children = avcc_box + EXACT_COLR_19B + EXACT_PASP_16B + btrt_box
+                colr_atom = EXACT_COLR_HLG_19B if use_hdr_flag else EXACT_COLR_19B
+                avc1_children = avcc_box + colr_atom + EXACT_PASP_16B + btrt_box
                 avc1_size = 86 + len(avc1_children)
                 struct.pack_into(">I", avc1_hdr, 0, avc1_size)
                 avc1_box = bytes(avc1_hdr) + avc1_children
@@ -1292,6 +1314,10 @@ def rebuild_box_py(box_data, is_video_trak, target_w, target_h):
             out = bytearray(box_data)
             if len(out) >= 16 + 36:
                 struct.pack_into(">HH", out, 16 + 32, target_w, target_h)
+            if use_hdr_flag:
+                idx = out.find(b"colrnclx")
+                if idx != -1 and idx + 14 <= len(out):
+                    struct.pack_into(">HHH", out, idx + 8, 9, 18, 9)
             return bytes(out)
 
     if btype not in (b"trak", b"mdia", b"minf", b"stbl"):
@@ -1308,7 +1334,7 @@ def rebuild_box_py(box_data, is_video_trak, target_w, target_h):
             csz = cend - cpos
         if csz < 8 or cpos + csz > cend:
             break
-        children.append(rebuild_box_py(box_data[cpos:cpos + csz], is_video_trak, target_w, target_h))
+        children.append(rebuild_box_py(box_data[cpos:cpos + csz], is_video_trak, target_w, target_h, use_hdr_flag))
         cpos += csz
 
     children_bytes = b"".join(children)
@@ -1349,7 +1375,7 @@ def shift_stco_py(buf, start, end_idx, delta):
         cur += bsz
 
 
-def apply_bypass_to_mp4_file(in_mp4_path, out_mp4_path, target_w, target_h):
+def apply_bypass_to_mp4_file(in_mp4_path, out_mp4_path, target_w, target_h, use_hdr_flag=False):
     file_size = os.path.getsize(in_mp4_path)
     moov_pos, moov_size = -1, 0
     mdat_pos, mdat_size, mdat_hdr_len = -1, 0, 8
@@ -1396,7 +1422,7 @@ def apply_bypass_to_mp4_file(in_mp4_path, out_mp4_path, target_w, target_h):
         if msz < 8 or mpos + msz > mend:
             break
         if mtp not in (b"mvhd", b"udta"):
-            new_children.append(rebuild_box_py(moov_bytes[mpos:mpos + msz], False, target_w, target_h))
+            new_children.append(rebuild_box_py(moov_bytes[mpos:mpos + msz], False, target_w, target_h, use_hdr_flag))
         mpos += msz
 
     new_children.append(build_apple_ilst_udta_py("xuqingxinnocent"))
@@ -1579,9 +1605,34 @@ def background_process_job(job_id, in_path, processed_path, out_path, mode, orig
                 if rc2 != 0:
                     raise RuntimeError(f"FFmpeg encode error: {err_tail2[-250:]}")
 
+        elif mode == "hdr_hlg_flag":
+            target_w, target_h = calculate_target_resolution_py(orig_w, orig_h)
+            log(f"[INFO] True HLG/HDR10 Color Flag + Bypass: Stream copy + Rec.2020/HLG Color Atom ({target_w}x{target_h})...")
+            cmd = [
+                "ffmpeg", "-y", "-i", in_path,
+                "-map", "0:v:0", "-map", "0:a?",
+                "-c", "copy",
+                "-movflags", "+faststart",
+                processed_path
+            ]
+            rc, err_tail = run_ffmpeg_with_live_logs(cmd, job_id, log)
+            if rc != 0 or not os.path.exists(processed_path) or os.path.getsize(processed_path) < 1024:
+                log("[WARN] Stream copy not compatible, transcoding with BT.2020 HLG VUI flags at CRF 18...")
+                cmd_tr = [
+                    "ffmpeg", "-y", "-i", in_path,
+                    "-map", "0:v:0", "-map", "0:a?",
+                    "-c:v", "libx264", "-preset", "superfast", "-crf", "18",
+                    "-color_primaries", "bt2020", "-color_trc", "arib-std-b67", "-colorspace", "bt2020nc",
+                    "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k",
+                    "-movflags", "+faststart", processed_path
+                ]
+                rc2, err_tail2 = run_ffmpeg_with_live_logs(cmd_tr, job_id, log)
+                if rc2 != 0:
+                    raise RuntimeError(f"FFmpeg HDR fallback failed: {err_tail2[-250:]}")
+
         elif mode == "passthrough_1080p":
             target_w, target_h = calculate_target_resolution_py(orig_w, orig_h)
-            log(f"[INFO] 𝟏𝟎𝟖𝟎𝐏: Stream copy remux (Header: {target_w}x{target_h})...")
+            log(f"[INFO] 1080P + Bypass mode: Stream copy remux (Header: {target_w}x{target_h})...")
             cmd = [
                 "ffmpeg", "-y", "-i", in_path,
                 "-map", "0:v:0", "-map", "0:a?",
@@ -1605,7 +1656,7 @@ def background_process_job(job_id, in_path, processed_path, out_path, mode, orig
 
         elif mode == "all_bypass":
             target_w, target_h = orig_w, orig_h
-            log(f"[INFO] 𝐀𝐥𝐥 𝐑𝐞𝐬𝐨𝐥𝐮𝐭𝐢𝐨𝐧 𝐒𝐮𝐩𝐩𝐨𝐫𝐭: Keeping original resolution {target_w}x{target_h}...")
+            log(f"[INFO] All Video + Bypass: Keeping original resolution {target_w}x{target_h}...")
             cmd = [
                 "ffmpeg", "-y", "-i", in_path,
                 "-map", "0:v:0", "-map", "0:a?",
@@ -1639,8 +1690,9 @@ def background_process_job(job_id, in_path, processed_path, out_path, mode, orig
             JOBS[job_id]["step"] = 4
             JOBS[job_id]["progress"] = 90
 
-        log(f"[INFO] Applying exact binary bypass ({target_w}x{target_h})...")
-        apply_bypass_to_mp4_file(processed_path, out_path, target_w, target_h)
+        use_hdr_flag = (mode == "hdr_hlg_flag")
+        log(f"[INFO] Applying exact binary bypass ({target_w}x{target_h}, HDR_HLG={use_hdr_flag})...")
+        apply_bypass_to_mp4_file(processed_path, out_path, target_w, target_h, use_hdr_flag=use_hdr_flag)
 
         # Free disk space by removing intermediate processed.mp4
         try:
