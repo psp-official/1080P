@@ -383,10 +383,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         <div class="mode-section">
             <div class="mode-label">Select Processing Mode</div>
             <select id="modeSelect" class="mode-select">
-                <option value="clarity_boost">HQ Clarity Boost (Sharpen + Color + Bypass)</option>
-                <option value="downscale_4k">4K, 2K Encoding Downscale + Bypass</option>
-                <option value="passthrough_1080p">1080P + Bypass (No Downscale)</option>
-                <option value="all_bypass">All Video + Bypass (Original Resolution)</option>
+                <option value="clarity_boost">HQ Qᴜᴀʟɪᴛʏ Bᴏᴏsᴛ (Sʜᴀʀᴘᴇɴ + Cᴏʟᴏʀ)</option>
+                <option value="downscale_4k">𝟺K, 𝟸K Eɴᴄᴏᴅɪɴɢ Dᴏᴡɴsᴄᴀʟᴇ</option>
+                <option value="passthrough_1080p">1080P</option>
+                <option value="all_bypass">Aʟʟ Rᴇsᴏʟᴜᴛɪᴏɴ Sᴜᴘᴘᴏʀᴛ</option>
             </select>
         </div>
 
