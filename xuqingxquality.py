@@ -13,7 +13,7 @@ from flask import Flask, request, render_template_string, send_file, jsonify
 
 app = Flask(__name__)
 
-JOBS_DIR = "/tmp/test_encoder_jobs"
+JOBS_DIR = "/tmp/xuqingxquality_jobs"
 os.makedirs(JOBS_DIR, exist_ok=True)
 
 JOBS = {}
