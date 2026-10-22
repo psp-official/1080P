@@ -1640,25 +1640,34 @@ def background_process_job(job_id, in_path, processed_path, out_path, mode, orig
 
             scale_hq = f"scale={target_w}:{target_h}:flags=lanczos+accurate_rnd+full_chroma_int+full_chroma_inp"
 
+            # Why v14 looked dark:
+            # 1) zscale's default 'nominal_luminance' is 100 nits inside a 1000-nit HLG container, which compresses SDR white to 50% signal and crushes midtones/shadows!
+            # 2) HLG display decoding applies a steep exponential gamma (~1.2 system gamma) and dims the screen/UI. Using gamma=0.95 darkened midtones even further!
+            # Solution:
+            # Map SDR to HLG with a Bright HDR Luminance Lift (nominal_luminance=450 + gamma=1.26 midtone/highlight lift + curves='0/0 0.25/0.34 0.65/0.78 1/1')
+            # so shadows, faces, and subtitles shine brightly while triggering TikTok's HLG HDR effect!
             vf_hdr_zscale = (
                 f"{scale_hq},"
                 f"cas=0.75,"
                 f"unsharp=3:3:0.65:3:3:0.0,"
-                f"zscale=primaries=bt2020:transfer=arib-std-b67:matrix=bt2020nc:range=limited:filter=spline36,"
-                f"eq=contrast=1.08:saturation=1.22:gamma=0.96:brightness=0.01,"
+                f"zscale=primaries=bt2020:transfer=arib-std-b67:matrix=bt2020nc:range=limited:nominal_luminance=450:filter=spline36,"
+                f"curves=all='0/0 0.22/0.32 0.60/0.75 1/1',"
+                f"eq=contrast=1.06:saturation=1.25:gamma=1.22:brightness=0.03,"
                 f"format=yuv420p10le"
             )
             vf_hdr_rich = (
                 f"{scale_hq},"
                 f"cas=0.75,"
                 f"unsharp=3:3:0.70:3:3:0.0,"
-                f"eq=contrast=1.10:saturation=1.26:gamma=0.95:brightness=0.01,"
+                f"curves=all='0/0 0.22/0.33 0.60/0.76 1/1',"
+                f"eq=contrast=1.06:saturation=1.26:gamma=1.26:brightness=0.04,"
                 f"format=yuv420p10le"
             )
             vf_hdr_universal = (
                 f"{scale_hq},"
                 f"unsharp=3:3:0.95:3:3:0.0,"
-                f"eq=contrast=1.10:saturation=1.26:gamma=0.95:brightness=0.01,"
+                f"curves=all='0/0 0.22/0.33 0.60/0.76 1/1',"
+                f"eq=contrast=1.06:saturation=1.26:gamma=1.26:brightness=0.04,"
                 f"format=yuv420p10le"
             )
 
