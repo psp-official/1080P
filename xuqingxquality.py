@@ -13,7 +13,7 @@ from flask import Flask, request, render_template_string, send_file, jsonify
 
 app = Flask(__name__)
 
-JOBS_DIR = "/tmp/xuqingxquality_jobs"
+JOBS_DIR = "/tmp/test_encoder_jobs"
 os.makedirs(JOBS_DIR, exist_ok=True)
 
 JOBS = {}
@@ -383,7 +383,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         <div class="mode-section">
             <div class="mode-label">Select Processing Mode</div>
             <select id="modeSelect" class="mode-select">
-                <option value="hdr_hlg_flag">True HLG/HDR10 Color Flag + Bypass (Instant HDR)</option>
+                <option value="hdr_hlg_flag">True 10-Bit HLG HDR (Comment Dimming Effect + Bypass)</option>
                 <option value="clarity_boost">HQ Clarity Boost (Sharpen + Color + Bypass)</option>
                 <option value="downscale_4k">4K, 2K Encoding Downscale + Bypass</option>
                 <option value="passthrough_1080p">1080P + Bypass (No Downscale)</option>
@@ -1066,17 +1066,14 @@ async function startProcess() {
     appendLog(`[INFO] Input: ${origW}x${origH} @ ${fps}fps (${formatBytesMB(selectedFile.size)})`);
 
     try {
-        // Fast Client-Side Path for hdr_hlg_flag, passthrough_1080p, and all_bypass (if valid MP4)
-        if (selectedMode === 'hdr_hlg_flag' || selectedMode === 'passthrough_1080p' || selectedMode === 'all_bypass') {
-            const targetRes = (selectedMode === 'passthrough_1080p' || selectedMode === 'hdr_hlg_flag')
+        // Fast Client-Side Path for passthrough_1080p and all_bypass (if valid MP4)
+        // Note: hdr_hlg_flag routes to Server FFmpeg so it encodes True 10-bit (yuv420p10le) HEVC/AVC HLG required for TikTok Comment Dimming Effect!
+        if (selectedMode === 'passthrough_1080p' || selectedMode === 'all_bypass') {
+            const targetRes = (selectedMode === 'passthrough_1080p')
                 ? calculateTargetResolution(origW, origH)
                 : { width: origW, height: origH };
-            const useHdrFlag = (selectedMode === 'hdr_hlg_flag');
-            if (useHdrFlag) {
-                appendLog(`[HDR] Injecting True Rec.2020 HLG/HDR10 Color Flag (0009 0012 0009)...`);
-            }
 
-            const fastBlob = await tryFastClientSideBypass(selectedFile, targetRes.width, targetRes.height, useHdrFlag);
+            const fastBlob = await tryFastClientSideBypass(selectedFile, targetRes.width, targetRes.height, false);
             if (fastBlob) {
                 const baseName = (selectedFile.name || "video").replace(/\.[^/.]+$/, "");
                 const outFilename = `${baseName}_xuqingxinnocent_${targetRes.width}x${targetRes.height}_${fps}fps.mp4`;
@@ -1192,6 +1189,7 @@ async function startProcess() {
 
 # Use binascii.unhexlify for all binary constants so NO literal null bytes ever exist in the source code!
 EXACT_AVC1_FTYP_32B = binascii.unhexlify("000000206674797069736f6d0000020069736f6d69736f32617663316d703431")
+EXACT_HVC1_FTYP_32B = binascii.unhexlify("000000206674797069736f6d0000020069736f6d69736f32687663316d703431")
 EXACT_MVHD_120B = binascii.unhexlify("000000786d7668640100000000000000000000000000000000000000000003e8ffffffffffffffff0001000001000000000000000000000000010000000000000000000000000000000100000000000000000000000000004000000000000000000000000000000000000000000000000000000000000003")
 EXACT_COLR_19B = binascii.unhexlify("00000013636f6c726e636c7800010001000100")
 EXACT_COLR_HLG_19B = binascii.unhexlify("00000013636f6c726e636c7800090012000900")
@@ -1311,13 +1309,24 @@ def rebuild_box_py(box_data, is_video_trak, target_w, target_h, use_hdr_flag=Fal
                 avc1_box = bytes(avc1_hdr) + avc1_children
                 return struct.pack(">I4sII", 16 + len(avc1_box), b"stsd", 0, 1) + avc1_box
         elif entry_type in (b"hvc1", b"hev1"):
+            # Rebuild hvc1/hev1 sample entry with clean dimensions, hvcC, and True Rec.2020 HLG colr atom
             out = bytearray(box_data)
-            if len(out) >= 16 + 36:
+            if len(out) >= 16 + 86:
+                # Force 'hvc1' tag for maximum iOS/TikTok hardware EDR compatibility
+                out[20:24] = b"hvc1"
                 struct.pack_into(">HH", out, 16 + 32, target_w, target_h)
-            if use_hdr_flag:
+                out[16 + 50:16 + 82] = ZERO_32B
                 idx = out.find(b"colrnclx")
                 if idx != -1 and idx + 14 <= len(out):
-                    struct.pack_into(">HHH", out, idx + 8, 9, 18, 9)
+                    if use_hdr_flag:
+                        struct.pack_into(">HHH", out, idx + 8, 9, 18, 9)
+                elif use_hdr_flag:
+                    # Append EXACT_COLR_HLG_19B into hvc1 box and update stsd + hvc1 sizes
+                    hvc1_old_sz = struct.unpack_from(">I", out, 16)[0]
+                    if 16 + hvc1_old_sz <= len(out):
+                        out = out[:16 + hvc1_old_sz] + bytearray(EXACT_COLR_HLG_19B)
+                        struct.pack_into(">I", out, 16, hvc1_old_sz + len(EXACT_COLR_HLG_19B))
+                        struct.pack_into(">I", out, 0, len(out))
             return bytes(out)
 
     if btype not in (b"trak", b"mdia", b"minf", b"stbl"):
@@ -1428,8 +1437,10 @@ def apply_bypass_to_mp4_file(in_mp4_path, out_mp4_path, target_w, target_h, use_
     new_children.append(build_apple_ilst_udta_py("xuqingxinnocent"))
     children_buf = bytearray(b"".join(new_children))
 
+    is_hevc_stream = (b"hvc1" in children_buf or b"hev1" in children_buf)
+    ftyp_bytes = EXACT_HVC1_FTYP_32B if is_hevc_stream else EXACT_AVC1_FTYP_32B
     new_moov_size = 8 + len(children_buf)
-    new_mdat_pos = len(EXACT_AVC1_FTYP_32B) + new_moov_size
+    new_mdat_pos = len(ftyp_bytes) + new_moov_size
 
     mdat_payload_pos = mdat_pos + mdat_hdr_len
     mdat_payload_size = mdat_size - mdat_hdr_len
@@ -1448,7 +1459,7 @@ def apply_bypass_to_mp4_file(in_mp4_path, out_mp4_path, target_w, target_h, use_
     new_moov_box = struct.pack(">I4s", new_moov_size, b"moov") + bytes(children_buf)
 
     with open(in_mp4_path, "rb") as fin, open(out_mp4_path, "wb") as fout:
-        fout.write(EXACT_AVC1_FTYP_32B)
+        fout.write(ftyp_bytes)
         fout.write(new_moov_box)
         fout.write(new_mdat_hdr)
         fin.seek(mdat_payload_pos)
@@ -1607,28 +1618,44 @@ def background_process_job(job_id, in_path, processed_path, out_path, mode, orig
 
         elif mode == "hdr_hlg_flag":
             target_w, target_h = calculate_target_resolution_py(orig_w, orig_h)
-            log(f"[INFO] True HLG/HDR10 Color Flag + Bypass: Stream copy + Rec.2020/HLG Color Atom ({target_w}x{target_h})...")
-            cmd = [
+            log(f"[INFO] True 10-Bit HLG HDR Mode: Encoding 10-bit (yuv420p10le) Rec.2020 HLG for TikTok Comment Dimming Effect ({target_w}x{target_h})...")
+            # Filter chain: Lanczos scale + subtle highlight/contrast expansion + 10-bit pixel format
+            vf_hdr = (
+                f"scale={target_w}:{target_h}:flags=lanczos,"
+                f"unsharp=5:5:0.75:3:3:0.0,"
+                f"eq=contrast=1.06:saturation=1.12:gamma=0.95,"
+                f"format=yuv420p10le"
+            )
+            # 1st choice: True 10-Bit HEVC (libx265 Main10) with HLG VUI & ATC SEI=18 (triggers iPhone/Android EDR Screen & Comment Dimming)
+            cmd_hevc_hdr = [
                 "ffmpeg", "-y", "-i", in_path,
                 "-map", "0:v:0", "-map", "0:a?",
-                "-c", "copy",
+                "-vf", vf_hdr,
+                "-c:v", "libx265", "-preset", "ultrafast", "-crf", "18",
+                "-tag:v", "hvc1",
+                "-x265-params", f"colorprim=bt2020:transfer=arib-std-b67:colormatrix=bt2020nc:atc-sei=18:vbv-maxrate={maxrate_kbps}:vbv-bufsize={bufsize_kbps}",
+                "-color_primaries", "bt2020", "-color_trc", "arib-std-b67", "-colorspace", "bt2020nc",
+                "-c:a", "aac", "-b:a", "192k",
                 "-movflags", "+faststart",
                 processed_path
             ]
-            rc, err_tail = run_ffmpeg_with_live_logs(cmd, job_id, log)
+            rc, err_tail = run_ffmpeg_with_live_logs(cmd_hevc_hdr, job_id, log)
             if rc != 0 or not os.path.exists(processed_path) or os.path.getsize(processed_path) < 1024:
-                log("[WARN] Stream copy not compatible, transcoding with BT.2020 HLG VUI flags at CRF 18...")
-                cmd_tr = [
+                log("[WARN] libx265 10-bit not available, encoding with 10-Bit H.264 (High10 HLG) fallback...")
+                cmd_avc_hdr = [
                     "ffmpeg", "-y", "-i", in_path,
                     "-map", "0:v:0", "-map", "0:a?",
-                    "-c:v", "libx264", "-preset", "superfast", "-crf", "18",
+                    "-vf", vf_hdr,
+                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+                    "-maxrate", f"{maxrate_kbps}k", "-bufsize", f"{bufsize_kbps}k",
                     "-color_primaries", "bt2020", "-color_trc", "arib-std-b67", "-colorspace", "bt2020nc",
-                    "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k",
-                    "-movflags", "+faststart", processed_path
+                    "-c:a", "aac", "-b:a", "192k",
+                    "-movflags", "+faststart",
+                    processed_path
                 ]
-                rc2, err_tail2 = run_ffmpeg_with_live_logs(cmd_tr, job_id, log)
+                rc2, err_tail2 = run_ffmpeg_with_live_logs(cmd_avc_hdr, job_id, log)
                 if rc2 != 0:
-                    raise RuntimeError(f"FFmpeg HDR fallback failed: {err_tail2[-250:]}")
+                    raise RuntimeError(f"FFmpeg 10-bit HDR encode error: {err_tail2[-250:]}")
 
         elif mode == "passthrough_1080p":
             target_w, target_h = calculate_target_resolution_py(orig_w, orig_h)
