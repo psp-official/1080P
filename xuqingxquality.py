@@ -1632,11 +1632,11 @@ def background_process_job(job_id, in_path, processed_path, out_path, mode, orig
             eff_w, eff_h = (orig_h, orig_w) if rot_deg in (90, 270) else (orig_w, orig_h)
             target_w, target_h = calculate_target_resolution_py(eff_w, eff_h)
 
-            # High Bitrate Ceiling (35 Mbps) + CRF 12 + NO-SAO + High-Precision Lanczos (accurate_rnd+full_chroma_int)
-            # NO hqdn3d blur filter so 4K (2160x3840) -> 1080p supersampling keeps 100% razor-sharp 4K micro-details!
-            hdr_maxrate = 35000
-            hdr_bufsize = 70000
-            log(f"[INFO] True HLG/HDR10 4K->1080p Supersampling: {eff_w}x{eff_h} -> {target_w}x{target_h} (CRF 12, No-SAO, 35Mbps, Rich HLG)...")
+            # TikTok Optimal Smooth HDR Bitrate Ceiling (14 Mbps maxrate / 28 Mbps bufsize) + CRF 15 + NO-SAO
+            # Prevents TikTok player buffering/stuttering while preserving 100% razor-sharp 4K->1080p supersampled details!
+            hdr_maxrate = 14000
+            hdr_bufsize = 28000
+            log(f"[INFO] True HLG/HDR10 4K->1080p Supersampling: {eff_w}x{eff_h} -> {target_w}x{target_h} (CRF 15, No-SAO, 14Mbps Smooth TikTok HDR)...")
 
             scale_hq = f"scale={target_w}:{target_h}:flags=lanczos+accurate_rnd+full_chroma_int+full_chroma_inp"
 
@@ -1662,40 +1662,40 @@ def background_process_job(job_id, in_path, processed_path, out_path, mode, orig
                 f"format=yuv420p10le"
             )
 
-            # x265 params: no-sao=1, deblock=-1:-1, psy-rd=2.0, aq-mode=3 prevents HEVC from smoothing/blurring 4K downscaled details!
+            # x265 params: no-sao=1, deblock=-1:-1, psy-rd=2.0, aq-mode=3 + keyint=60 for smooth zero-stutter TikTok playback!
             x265_hq_params = (
                 f"colorprim=bt2020:transfer=arib-std-b67:colormatrix=bt2020nc:atc-sei=18:"
-                f"no-sao=1:deblock=-1,-1:psy-rd=2.0:aq-mode=3:aq-strength=1.0:"
+                f"no-sao=1:deblock=-1,-1:psy-rd=2.0:aq-mode=3:aq-strength=1.0:keyint=60:min-keyint=30:"
                 f"vbv-maxrate={hdr_maxrate}:vbv-bufsize={hdr_bufsize}"
             )
 
-            # Attempt 1: 10-bit HEVC (hvc1) with zscale spline36 + accurate Lanczos + No-SAO (CRF 12)
+            # Attempt 1: 10-bit HEVC (hvc1) with zscale spline36 + accurate Lanczos + No-SAO (CRF 15, 14Mbps)
             cmd_hdr_1 = [
                 "ffmpeg", "-y", "-i", in_path,
                 "-map", "0:v:0", "-map", "0:a?",
                 "-vf", vf_hdr_zscale,
-                "-c:v", "libx265", "-preset", "fast", "-crf", "12",
+                "-c:v", "libx265", "-preset", "fast", "-crf", "15",
                 "-tag:v", "hvc1",
                 "-x265-params", x265_hq_params,
                 "-color_primaries", "bt2020", "-color_trc", "arib-std-b67", "-colorspace", "bt2020nc",
-                "-c:a", "aac", "-b:a", "320k",
+                "-c:a", "aac", "-b:a", "256k",
                 "-movflags", "+faststart",
                 processed_path
             ]
             rc, err_tail = run_ffmpeg_with_live_logs(cmd_hdr_1, job_id, log)
 
-            # Attempt 2: 10-bit HEVC (hvc1) with Rich HDR Color Grading + CAS + Unsharp (CRF 12, No-SAO)
+            # Attempt 2: 10-bit HEVC (hvc1) with Rich HDR Color Grading + CAS + Unsharp (CRF 15, No-SAO, 14Mbps)
             if rc != 0 or not os.path.exists(processed_path) or os.path.getsize(processed_path) < 1024:
-                log("[INFO] Switching to Mastered 4K->1080p Supersampling Matrix (CAS 0.75 + 3x3 Micro-Unsharp + No-SAO, CRF 12)...")
+                log("[INFO] Switching to Mastered 4K->1080p Supersampling Matrix (CAS 0.75 + 3x3 Micro-Unsharp + No-SAO, CRF 15, 14Mbps)...")
                 cmd_hdr_2 = [
                     "ffmpeg", "-y", "-i", in_path,
                     "-map", "0:v:0", "-map", "0:a?",
                     "-vf", vf_hdr_rich,
-                    "-c:v", "libx265", "-preset", "fast", "-crf", "12",
+                    "-c:v", "libx265", "-preset", "fast", "-crf", "15",
                     "-tag:v", "hvc1",
                     "-x265-params", x265_hq_params,
                     "-color_primaries", "bt2020", "-color_trc", "arib-std-b67", "-colorspace", "bt2020nc",
-                    "-c:a", "aac", "-b:a", "320k",
+                    "-c:a", "aac", "-b:a", "256k",
                     "-movflags", "+faststart",
                     processed_path
                 ]
@@ -1703,32 +1703,33 @@ def background_process_job(job_id, in_path, processed_path, out_path, mode, orig
 
             # Attempt 3: Universal 10-bit HEVC (if cas filter not compiled)
             if rc != 0 or not os.path.exists(processed_path) or os.path.getsize(processed_path) < 1024:
-                log("[INFO] Using Universal 4K->1080p Supersampling Chain (3x3 Micro-Unsharp + Vivid Color + No-SAO, CRF 12)...")
+                log("[INFO] Using Universal 4K->1080p Supersampling Chain (3x3 Micro-Unsharp + Vivid Color + No-SAO, CRF 15, 14Mbps)...")
                 cmd_hdr_3 = [
                     "ffmpeg", "-y", "-i", in_path,
                     "-map", "0:v:0", "-map", "0:a?",
                     "-vf", vf_hdr_universal,
-                    "-c:v", "libx265", "-preset", "fast", "-crf", "12",
+                    "-c:v", "libx265", "-preset", "fast", "-crf", "15",
                     "-tag:v", "hvc1",
                     "-x265-params", x265_hq_params,
                     "-color_primaries", "bt2020", "-color_trc", "arib-std-b67", "-colorspace", "bt2020nc",
-                    "-c:a", "aac", "-b:a", "320k",
+                    "-c:a", "aac", "-b:a", "256k",
                     "-movflags", "+faststart",
                     processed_path
                 ]
                 rc, err_tail = run_ffmpeg_with_live_logs(cmd_hdr_3, job_id, log)
 
-            # Attempt 4: 10-bit H.264 High10 fallback (CRF 12, 35Mbps)
+            # Attempt 4: 10-bit H.264 High10 fallback (CRF 15, 14Mbps)
             if rc != 0 or not os.path.exists(processed_path) or os.path.getsize(processed_path) < 1024:
-                log("[WARN] libx265 not available, encoding with 10-Bit H.264 (High10 Rich HLG HDR) at CRF 12...")
+                log("[WARN] libx265 not available, encoding with 10-Bit H.264 (High10 Rich HLG HDR) at CRF 15 (14Mbps)...")
                 cmd_hdr_4 = [
                     "ffmpeg", "-y", "-i", in_path,
                     "-map", "0:v:0", "-map", "0:a?",
                     "-vf", vf_hdr_universal,
-                    "-c:v", "libx264", "-preset", "fast", "-crf", "12",
+                    "-c:v", "libx264", "-preset", "fast", "-crf", "15",
+                    "-g", "60", "-keyint_min", "30",
                     "-maxrate", f"{hdr_maxrate}k", "-bufsize", f"{hdr_bufsize}k",
                     "-color_primaries", "bt2020", "-color_trc", "arib-std-b67", "-colorspace", "bt2020nc",
-                    "-c:a", "aac", "-b:a", "320k",
+                    "-c:a", "aac", "-b:a", "256k",
                     "-movflags", "+faststart",
                     processed_path
                 ]
