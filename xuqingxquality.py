@@ -1613,69 +1613,89 @@ def background_process_job(job_id, in_path, processed_path, out_path, mode, orig
                     raise RuntimeError(f"FFmpeg encode error: {err_tail2[-250:]}")
 
         elif mode == "hdr_hlg_flag":
-            target_w, target_h = calculate_target_resolution_py(orig_w, orig_h)
-            hdr_maxrate = max(16000, min(28000, int(maxrate_kbps * 1.8)))
-            hdr_bufsize = hdr_maxrate * 2
-            log(f"[INFO] True HLG/HDR10 (Crisp & Vivid Color Edition): 10-bit HLG + CAS Sharpen + Rich Color Grading ({target_w}x{target_h}, CRF 14)...")
+            # Detect rotation metadata so 2160x3840 (portrait) vs 3840x2160 (landscape) is NEVER swapped to wrong aspect ratio!
+            rot_deg = 0
+            try:
+                rot_cmd = [
+                    "ffprobe", "-v", "error", "-select_streams", "v:0",
+                    "-show_entries", "stream_tags=rotate:side_data=rotation", "-of", "json", in_path
+                ]
+                r_res = subprocess.run(rot_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                if r_res.returncode == 0:
+                    r_txt = r_res.stdout.decode("utf-8", errors="ignore")
+                    m_rot = re.search(r'"rotation"\s*:\s*(-?\d+)', r_txt) or re.search(r'"rotate"\s*:\s*"(-?\d+)"', r_txt)
+                    if m_rot:
+                        rot_deg = abs(int(m_rot.group(1))) % 360
+            except Exception:
+                pass
 
-            # Why colors looked bad in v10:
-            # 1) Using '-preset ultrafast' destroyed fine texture details.
-            # 2) Tagging BT.709 video as BT.2020 without proper color space conversion or vibrance/contrast compensation made colors look washed-out or weird.
-            # Solution:
-            # Try zscale true BT.709 -> BT.2020 HLG conversion + CAS crisp sharpening + rich vivid color grading at CRF 14 ('fast' preset).
-            # If zscale filter is not compiled in FFmpeg, use our mastered Rich HDR Color Matrix (hqdn3d + cas/unsharp + vibrance/saturation/contrast S-curve) so colors pop vividly in BT.2020 HLG!
+            eff_w, eff_h = (orig_h, orig_w) if rot_deg in (90, 270) else (orig_w, orig_h)
+            target_w, target_h = calculate_target_resolution_py(eff_w, eff_h)
+
+            # High Bitrate Ceiling (35 Mbps) + CRF 12 + NO-SAO + High-Precision Lanczos (accurate_rnd+full_chroma_int)
+            # NO hqdn3d blur filter so 4K (2160x3840) -> 1080p supersampling keeps 100% razor-sharp 4K micro-details!
+            hdr_maxrate = 35000
+            hdr_bufsize = 70000
+            log(f"[INFO] True HLG/HDR10 4K->1080p Supersampling: {eff_w}x{eff_h} -> {target_w}x{target_h} (CRF 12, No-SAO, 35Mbps, Rich HLG)...")
+
+            scale_hq = f"scale={target_w}:{target_h}:flags=lanczos+accurate_rnd+full_chroma_int+full_chroma_inp"
+
             vf_hdr_zscale = (
-                f"scale={target_w}:{target_h}:flags=lanczos,"
-                f"hqdn3d=1.0:1.0:3:3,"
-                f"cas=0.70,"
-                f"unsharp=5:5:0.85:3:3:0.0,"
-                f"zscale=primaries=bt2020:transfer=arib-std-b67:matrix=bt2020nc:range=limited,"
+                f"{scale_hq},"
+                f"cas=0.75,"
+                f"unsharp=3:3:0.65:3:3:0.0,"
+                f"zscale=primaries=bt2020:transfer=arib-std-b67:matrix=bt2020nc:range=limited:filter=spline36,"
                 f"eq=contrast=1.08:saturation=1.22:gamma=0.96:brightness=0.01,"
                 f"format=yuv420p10le"
             )
             vf_hdr_rich = (
-                f"scale={target_w}:{target_h}:flags=lanczos,"
-                f"hqdn3d=1.0:1.0:3:3,"
-                f"cas=0.70,"
-                f"unsharp=5:5:0.90:3:3:0.0,"
-                f"eq=contrast=1.10:saturation=1.28:gamma=0.94:brightness=0.01,"
+                f"{scale_hq},"
+                f"cas=0.75,"
+                f"unsharp=3:3:0.70:3:3:0.0,"
+                f"eq=contrast=1.10:saturation=1.26:gamma=0.95:brightness=0.01,"
                 f"format=yuv420p10le"
             )
             vf_hdr_universal = (
-                f"scale={target_w}:{target_h}:flags=lanczos,"
-                f"hqdn3d=1.0:1.0:3:3,"
-                f"unsharp=5:5:1.15:3:3:0.2,"
-                f"eq=contrast=1.10:saturation=1.28:gamma=0.94:brightness=0.01,"
+                f"{scale_hq},"
+                f"unsharp=3:3:0.95:3:3:0.0,"
+                f"eq=contrast=1.10:saturation=1.26:gamma=0.95:brightness=0.01,"
                 f"format=yuv420p10le"
             )
 
-            # Attempt 1: 10-bit HEVC (hvc1) with zscale BT.2020 HLG + CAS Sharpen + Rich Color (CRF 14, fast preset)
+            # x265 params: no-sao=1, deblock=-1:-1, psy-rd=2.0, aq-mode=3 prevents HEVC from smoothing/blurring 4K downscaled details!
+            x265_hq_params = (
+                f"colorprim=bt2020:transfer=arib-std-b67:colormatrix=bt2020nc:atc-sei=18:"
+                f"no-sao=1:deblock=-1,-1:psy-rd=2.0:aq-mode=3:aq-strength=1.0:"
+                f"vbv-maxrate={hdr_maxrate}:vbv-bufsize={hdr_bufsize}"
+            )
+
+            # Attempt 1: 10-bit HEVC (hvc1) with zscale spline36 + accurate Lanczos + No-SAO (CRF 12)
             cmd_hdr_1 = [
                 "ffmpeg", "-y", "-i", in_path,
                 "-map", "0:v:0", "-map", "0:a?",
                 "-vf", vf_hdr_zscale,
-                "-c:v", "libx265", "-preset", "fast", "-crf", "14",
+                "-c:v", "libx265", "-preset", "fast", "-crf", "12",
                 "-tag:v", "hvc1",
-                "-x265-params", f"colorprim=bt2020:transfer=arib-std-b67:colormatrix=bt2020nc:atc-sei=18:vbv-maxrate={hdr_maxrate}:vbv-bufsize={hdr_bufsize}",
+                "-x265-params", x265_hq_params,
                 "-color_primaries", "bt2020", "-color_trc", "arib-std-b67", "-colorspace", "bt2020nc",
-                "-c:a", "aac", "-b:a", "256k",
+                "-c:a", "aac", "-b:a", "320k",
                 "-movflags", "+faststart",
                 processed_path
             ]
             rc, err_tail = run_ffmpeg_with_live_logs(cmd_hdr_1, job_id, log)
 
-            # Attempt 2: 10-bit HEVC (hvc1) with Rich HDR Color Grading + CAS + Unsharp (if zscale not compiled)
+            # Attempt 2: 10-bit HEVC (hvc1) with Rich HDR Color Grading + CAS + Unsharp (CRF 12, No-SAO)
             if rc != 0 or not os.path.exists(processed_path) or os.path.getsize(processed_path) < 1024:
-                log("[INFO] Switching to Rich HDR Color Matrix (CAS + Unsharp + Vivid Saturation 1.28 + 10-bit HLG, CRF 14)...")
+                log("[INFO] Switching to Mastered 4K->1080p Supersampling Matrix (CAS 0.75 + 3x3 Micro-Unsharp + No-SAO, CRF 12)...")
                 cmd_hdr_2 = [
                     "ffmpeg", "-y", "-i", in_path,
                     "-map", "0:v:0", "-map", "0:a?",
                     "-vf", vf_hdr_rich,
-                    "-c:v", "libx265", "-preset", "fast", "-crf", "14",
+                    "-c:v", "libx265", "-preset", "fast", "-crf", "12",
                     "-tag:v", "hvc1",
-                    "-x265-params", f"colorprim=bt2020:transfer=arib-std-b67:colormatrix=bt2020nc:atc-sei=18:vbv-maxrate={hdr_maxrate}:vbv-bufsize={hdr_bufsize}",
+                    "-x265-params", x265_hq_params,
                     "-color_primaries", "bt2020", "-color_trc", "arib-std-b67", "-colorspace", "bt2020nc",
-                    "-c:a", "aac", "-b:a", "256k",
+                    "-c:a", "aac", "-b:a", "320k",
                     "-movflags", "+faststart",
                     processed_path
                 ]
@@ -1683,32 +1703,32 @@ def background_process_job(job_id, in_path, processed_path, out_path, mode, orig
 
             # Attempt 3: Universal 10-bit HEVC (if cas filter not compiled)
             if rc != 0 or not os.path.exists(processed_path) or os.path.getsize(processed_path) < 1024:
-                log("[INFO] Using Universal Rich HDR Filter Chain (Unsharp + Vivid Color + 10-bit HLG)...")
+                log("[INFO] Using Universal 4K->1080p Supersampling Chain (3x3 Micro-Unsharp + Vivid Color + No-SAO, CRF 12)...")
                 cmd_hdr_3 = [
                     "ffmpeg", "-y", "-i", in_path,
                     "-map", "0:v:0", "-map", "0:a?",
                     "-vf", vf_hdr_universal,
-                    "-c:v", "libx265", "-preset", "fast", "-crf", "14",
+                    "-c:v", "libx265", "-preset", "fast", "-crf", "12",
                     "-tag:v", "hvc1",
-                    "-x265-params", f"colorprim=bt2020:transfer=arib-std-b67:colormatrix=bt2020nc:atc-sei=18:vbv-maxrate={hdr_maxrate}:vbv-bufsize={hdr_bufsize}",
+                    "-x265-params", x265_hq_params,
                     "-color_primaries", "bt2020", "-color_trc", "arib-std-b67", "-colorspace", "bt2020nc",
-                    "-c:a", "aac", "-b:a", "256k",
+                    "-c:a", "aac", "-b:a", "320k",
                     "-movflags", "+faststart",
                     processed_path
                 ]
                 rc, err_tail = run_ffmpeg_with_live_logs(cmd_hdr_3, job_id, log)
 
-            # Attempt 4: 10-bit H.264 High10 fallback (if libx265 not available on server)
+            # Attempt 4: 10-bit H.264 High10 fallback (CRF 12, 35Mbps)
             if rc != 0 or not os.path.exists(processed_path) or os.path.getsize(processed_path) < 1024:
-                log("[WARN] libx265 not available, encoding with 10-Bit H.264 (High10 Rich HLG HDR) at CRF 14...")
+                log("[WARN] libx265 not available, encoding with 10-Bit H.264 (High10 Rich HLG HDR) at CRF 12...")
                 cmd_hdr_4 = [
                     "ffmpeg", "-y", "-i", in_path,
                     "-map", "0:v:0", "-map", "0:a?",
                     "-vf", vf_hdr_universal,
-                    "-c:v", "libx264", "-preset", "fast", "-crf", "14",
+                    "-c:v", "libx264", "-preset", "fast", "-crf", "12",
                     "-maxrate", f"{hdr_maxrate}k", "-bufsize", f"{hdr_bufsize}k",
                     "-color_primaries", "bt2020", "-color_trc", "arib-std-b67", "-colorspace", "bt2020nc",
-                    "-c:a", "aac", "-b:a", "256k",
+                    "-c:a", "aac", "-b:a", "320k",
                     "-movflags", "+faststart",
                     processed_path
                 ]
