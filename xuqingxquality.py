@@ -13,7 +13,7 @@ from flask import Flask, request, render_template_string, send_file, jsonify
 
 app = Flask(__name__)
 
-JOBS_DIR = "/tmp/xuqingxquality_jobs"
+JOBS_DIR = "/tmp/test_encoder_jobs"
 os.makedirs(JOBS_DIR, exist_ok=True)
 
 JOBS = {}
@@ -524,7 +524,7 @@ const EXACT_AVC1_FTYP_32B = hexToBytes("000000206674797069736f6d0000020069736f6d
 const EXACT_MVHD_120B = hexToBytes("000000786d7668640100000000000000000000000000000000000000000003e8ffffffffffffffff0001000001000000000000000000000000010000000000000000000000000000000100000000000000000000000000004000000000000000000000000000000000000000000000000000000000000003");
 const EXACT_COLR_19B = hexToBytes("00000013636f6c726e636c7800010001000100");
 // True HLG/HDR10 Rec.2020 Color Atom: Primaries=9 (BT.2020), Transfer=18 (ARIB-STD-B67 HLG), Matrix=9 (BT.2020 NCL)
-const EXACT_COLR_HLG_19B = hexToBytes("00000013636f6c726e636c7800090012000900");
+const EXACT_COLR_HLG_19B = hexToBytes("00000013636f6c726e636c7800010012000100");
 const EXACT_PASP_16B = hexToBytes("00000010706173700000000100000001");
 const EXACT_BTRT_20B = hexToBytes("00000014627472740000000001312d0001312d00");
 
@@ -866,9 +866,9 @@ function rebuildBoxInBrowser(boxData, isVideoTrak, targetW, targetH, useHdrFlag 
                     for (let k = 16; k <= outStsd.byteLength - 15; k++) {
                         if (outStsd[k] === 0x63 && outStsd[k+1] === 0x6F && outStsd[k+2] === 0x6C && outStsd[k+3] === 0x72 &&
                             outStsd[k+4] === 0x6E && outStsd[k+5] === 0x63 && outStsd[k+6] === 0x6C && outStsd[k+7] === 0x78) {
-                            outStsd[k+8] = 0x00; outStsd[k+9] = 0x09;   // BT.2020 Primaries
+                            outStsd[k+8] = 0x00; outStsd[k+9] = 0x01;   // BT.709 Natural Primaries
                             outStsd[k+10] = 0x00; outStsd[k+11] = 0x12; // HLG Transfer (18)
-                            outStsd[k+12] = 0x00; outStsd[k+13] = 0x09; // BT.2020 Matrix
+                            outStsd[k+12] = 0x00; outStsd[k+13] = 0x01; // BT.709 Matrix
                             break;
                         }
                     }
@@ -1191,7 +1191,7 @@ EXACT_AVC1_FTYP_32B = binascii.unhexlify("000000206674797069736f6d0000020069736f
 EXACT_HVC1_FTYP_32B = binascii.unhexlify("000000206674797069736f6d0000020069736f6d69736f32687663316d703431")
 EXACT_MVHD_120B = binascii.unhexlify("000000786d7668640100000000000000000000000000000000000000000003e8ffffffffffffffff0001000001000000000000000000000000010000000000000000000000000000000100000000000000000000000000004000000000000000000000000000000000000000000000000000000000000003")
 EXACT_COLR_19B = binascii.unhexlify("00000013636f6c726e636c7800010001000100")
-EXACT_COLR_HLG_19B = binascii.unhexlify("00000013636f6c726e636c7800090012000900")
+EXACT_COLR_HLG_19B = binascii.unhexlify("00000013636f6c726e636c7800010012000100")
 EXACT_PASP_16B = binascii.unhexlify("00000010706173700000000100000001")
 EXACT_BTRT_20B = binascii.unhexlify("00000014627472740000000001312d0001312d00")
 ZERO_4B = binascii.unhexlify("00000000")
@@ -1316,7 +1316,7 @@ def rebuild_box_py(box_data, is_video_trak, target_w, target_h, use_hdr_flag=Fal
                 idx = out.find(b"colrnclx")
                 if idx != -1 and idx + 14 <= len(out):
                     if use_hdr_flag:
-                        struct.pack_into(">HHH", out, idx + 8, 9, 18, 9)
+                        struct.pack_into(">HHH", out, idx + 8, 1, 18, 1)
                 elif use_hdr_flag:
                     hvc1_old_sz = struct.unpack_from(">I", out, 16)[0]
                     if 16 + hvc1_old_sz <= len(out):
@@ -1545,7 +1545,9 @@ def background_process_job(job_id, in_path, processed_path, out_path, mode, orig
 
         if mode == "clarity_boost":
             target_w, target_h = calculate_target_resolution_py(orig_w, orig_h)
-            log(f"[INFO] HQ Clarity Boost: Denoising + CAS/Unsharp Sharpening + Color Boost ({target_w}x{target_h}, cap: {maxrate_kbps}k)...")
+            clarity_maxrate = 8000
+            clarity_bufsize = 16000
+            log(f"[INFO] HQ Clarity Boost: Denoising + CAS/Unsharp Sharpening + Color Boost ({target_w}x{target_h}, 12 Mbps)...")
             vf_primary = (
                 f"scale={target_w}:{target_h}:flags=lanczos,"
                 f"hqdn3d=1.2:1.2:4:4,"
@@ -1557,8 +1559,8 @@ def background_process_job(job_id, in_path, processed_path, out_path, mode, orig
                 "ffmpeg", "-y", "-i", in_path,
                 "-map", "0:v:0", "-map", "0:a?",
                 "-vf", vf_primary,
-                "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
-                "-maxrate", f"{maxrate_kbps}k", "-bufsize", f"{bufsize_kbps}k",
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "16",
+                "-maxrate", f"{clarity_maxrate}k", "-bufsize", f"{clarity_bufsize}k",
                 "-pix_fmt", "yuv420p",
                 "-c:a", "aac", "-b:a", "192k",
                 "-movflags", "+faststart",
@@ -1566,7 +1568,7 @@ def background_process_job(job_id, in_path, processed_path, out_path, mode, orig
             ]
             rc, err_tail = run_ffmpeg_with_live_logs(cmd, job_id, log)
             if rc != 0:
-                log("[WARN] Retrying Clarity Boost with universal Unsharp + HQDN3D + Color chain...")
+                log("[WARN] Retrying Clarity Boost with universal Unsharp + HQDN3D + Color chain (12 Mbps)...")
                 vf_fallback = (
                     f"scale={target_w}:{target_h}:flags=lanczos,"
                     f"hqdn3d=1.2:1.2:4:4,"
@@ -1577,8 +1579,8 @@ def background_process_job(job_id, in_path, processed_path, out_path, mode, orig
                     "ffmpeg", "-y", "-i", in_path,
                     "-map", "0:v:0", "-map", "0:a?",
                     "-vf", vf_fallback,
-                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
-                    "-maxrate", f"{maxrate_kbps}k", "-bufsize", f"{bufsize_kbps}k",
+                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "16",
+                    "-maxrate", f"{clarity_maxrate}k", "-bufsize", f"{clarity_bufsize}k",
                     "-pix_fmt", "yuv420p",
                     "-c:a", "aac", "-b:a", "192k",
                     "-movflags", "+faststart",
@@ -1632,116 +1634,87 @@ def background_process_job(job_id, in_path, processed_path, out_path, mode, orig
             eff_w, eff_h = (orig_h, orig_w) if rot_deg in (90, 270) else (orig_w, orig_h)
             target_w, target_h = calculate_target_resolution_py(eff_w, eff_h)
 
-            # TikTok Optimal Smooth HDR Bitrate Ceiling (14 Mbps maxrate / 28 Mbps bufsize) + CRF 15 + NO-SAO
-            # Prevents TikTok player buffering/stuttering while preserving 100% razor-sharp 4K->1080p supersampled details!
-            hdr_maxrate = 14000
-            hdr_bufsize = 28000
+            # TikTok Smooth Optimized Bitrate Ceiling (8 Mbps maxrate / 16 Mbps bufsize) - No Stutter, Crystal Clear HDR
+            hdr_maxrate = 8000
+            hdr_bufsize = 16000
             log(f"[INFO] True HLG/HDR10 4K->1080p Supersampling: {eff_w}x{eff_h} -> {target_w}x{target_h} (CRF 15, No-SAO, 14Mbps Smooth TikTok HDR)...")
 
             scale_hq = f"scale={target_w}:{target_h}:flags=lanczos+accurate_rnd+full_chroma_int+full_chroma_inp"
 
-            # Why v14 looked dark:
-            # 1) zscale's default 'nominal_luminance' is 100 nits inside a 1000-nit HLG container, which compresses SDR white to 50% signal and crushes midtones/shadows!
-            # 2) HLG display decoding applies a steep exponential gamma (~1.2 system gamma) and dims the screen/UI. Using gamma=0.95 darkened midtones even further!
-            # Solution:
-            # Map SDR to HLG with a Bright HDR Luminance Lift (nominal_luminance=450 + gamma=1.26 midtone/highlight lift + curves='0/0 0.25/0.34 0.65/0.78 1/1')
-            # so shadows, faces, and subtitles shine brightly while triggering TikTok's HLG HDR effect!
-            vf_hdr_zscale = (
+            # Natural Rich Color HLG HDR Pipeline:
+            # - Keeps BT.709 Color Primaries & Matrix (1, 18, 1) so original colors & skin tones NEVER shift to weird red/orange or washed-out grey!
+            # - Uses subtle, balanced vibrance (contrast=1.04, saturation=1.08, gamma=1.06) + CAS 0.70 crispness + 10-bit HLG Transfer (arib-std-b67, atc-sei=18)
+            vf_hdr_cas = (
                 f"{scale_hq},"
-                f"cas=0.75,"
-                f"unsharp=3:3:0.65:3:3:0.0,"
-                f"zscale=primaries=bt2020:transfer=arib-std-b67:matrix=bt2020nc:range=limited:nominal_luminance=450:filter=spline36,"
-                f"curves=all='0/0 0.22/0.32 0.60/0.75 1/1',"
-                f"eq=contrast=1.06:saturation=1.25:gamma=1.22:brightness=0.03,"
-                f"format=yuv420p10le"
-            )
-            vf_hdr_rich = (
-                f"{scale_hq},"
-                f"cas=0.75,"
-                f"unsharp=3:3:0.70:3:3:0.0,"
-                f"curves=all='0/0 0.22/0.33 0.60/0.76 1/1',"
-                f"eq=contrast=1.06:saturation=1.26:gamma=1.26:brightness=0.04,"
+                f"cas=0.70,"
+                f"unsharp=3:3:0.60:3:3:0.0,"
+                f"eq=contrast=1.04:saturation=1.08:gamma=1.06:brightness=0.01,"
                 f"format=yuv420p10le"
             )
             vf_hdr_universal = (
                 f"{scale_hq},"
-                f"unsharp=3:3:0.95:3:3:0.0,"
-                f"curves=all='0/0 0.22/0.33 0.60/0.76 1/1',"
-                f"eq=contrast=1.06:saturation=1.26:gamma=1.26:brightness=0.04,"
+                f"unsharp=3:3:0.85:3:3:0.0,"
+                f"eq=contrast=1.04:saturation=1.08:gamma=1.06:brightness=0.01,"
                 f"format=yuv420p10le"
             )
 
-            # x265 params: no-sao=1, deblock=-1:-1, psy-rd=2.0, aq-mode=3 + keyint=60 for smooth zero-stutter TikTok playback!
+            # x265 params: BT.709 natural color primaries/matrix + HLG transfer (arib-std-b67, atc-sei=18) + no-sao=1 + keyint=60
             x265_hq_params = (
-                f"colorprim=bt2020:transfer=arib-std-b67:colormatrix=bt2020nc:atc-sei=18:"
+                f"colorprim=bt709:transfer=arib-std-b67:colormatrix=bt709:atc-sei=18:"
                 f"no-sao=1:deblock=-1,-1:psy-rd=2.0:aq-mode=3:aq-strength=1.0:keyint=60:min-keyint=30:"
                 f"vbv-maxrate={hdr_maxrate}:vbv-bufsize={hdr_bufsize}"
             )
 
-            # Attempt 1: 10-bit HEVC (hvc1) with zscale spline36 + accurate Lanczos + No-SAO (CRF 15, 14Mbps)
+            # Attempt 1: 10-bit HEVC (hvc1) with CAS + Natural Rich BT.709 HLG Color (CRF 15, 14Mbps)
             cmd_hdr_1 = [
                 "ffmpeg", "-y", "-i", in_path,
                 "-map", "0:v:0", "-map", "0:a?",
-                "-vf", vf_hdr_zscale,
+                "-vf", vf_hdr_cas,
                 "-c:v", "libx265", "-preset", "fast", "-crf", "15",
                 "-tag:v", "hvc1",
                 "-x265-params", x265_hq_params,
-                "-color_primaries", "bt2020", "-color_trc", "arib-std-b67", "-colorspace", "bt2020nc",
+                "-color_primaries", "bt709", "-color_trc", "arib-std-b67", "-colorspace", "bt709",
                 "-c:a", "aac", "-b:a", "256k",
                 "-movflags", "+faststart",
                 processed_path
             ]
             rc, err_tail = run_ffmpeg_with_live_logs(cmd_hdr_1, job_id, log)
 
-            # Attempt 2: 10-bit HEVC (hvc1) with Rich HDR Color Grading + CAS + Unsharp (CRF 15, No-SAO, 14Mbps)
+            # Attempt 2: Universal 10-bit HEVC (if cas filter not compiled)
             if rc != 0 or not os.path.exists(processed_path) or os.path.getsize(processed_path) < 1024:
-                log("[INFO] Switching to Mastered 4K->1080p Supersampling Matrix (CAS 0.75 + 3x3 Micro-Unsharp + No-SAO, CRF 15, 14Mbps)...")
+                log("[INFO] Using Universal 4K->1080p Natural HLG Chain (3x3 Micro-Unsharp + Natural Color + No-SAO, CRF 15, 14Mbps)...")
                 cmd_hdr_2 = [
                     "ffmpeg", "-y", "-i", in_path,
                     "-map", "0:v:0", "-map", "0:a?",
-                    "-vf", vf_hdr_rich,
+                    "-vf", vf_hdr_universal,
                     "-c:v", "libx265", "-preset", "fast", "-crf", "15",
                     "-tag:v", "hvc1",
                     "-x265-params", x265_hq_params,
-                    "-color_primaries", "bt2020", "-color_trc", "arib-std-b67", "-colorspace", "bt2020nc",
+                    "-color_primaries", "bt709", "-color_trc", "arib-std-b67", "-colorspace", "bt709",
                     "-c:a", "aac", "-b:a", "256k",
                     "-movflags", "+faststart",
                     processed_path
                 ]
                 rc, err_tail = run_ffmpeg_with_live_logs(cmd_hdr_2, job_id, log)
 
-            # Attempt 3: Universal 10-bit HEVC (if cas filter not compiled)
+            # Attempt 3: 10-bit H.264 High10 fallback (CRF 15, 14Mbps)
             if rc != 0 or not os.path.exists(processed_path) or os.path.getsize(processed_path) < 1024:
-                log("[INFO] Using Universal 4K->1080p Supersampling Chain (3x3 Micro-Unsharp + Vivid Color + No-SAO, CRF 15, 14Mbps)...")
+                log("[WARN] libx265 not available, encoding with 10-Bit H.264 (High10 Natural HLG HDR) at CRF 15 (14Mbps)...")
                 cmd_hdr_3 = [
-                    "ffmpeg", "-y", "-i", in_path,
-                    "-map", "0:v:0", "-map", "0:a?",
-                    "-vf", vf_hdr_universal,
-                    "-c:v", "libx265", "-preset", "fast", "-crf", "15",
-                    "-tag:v", "hvc1",
-                    "-x265-params", x265_hq_params,
-                    "-color_primaries", "bt2020", "-color_trc", "arib-std-b67", "-colorspace", "bt2020nc",
-                    "-c:a", "aac", "-b:a", "256k",
-                    "-movflags", "+faststart",
-                    processed_path
-                ]
-                rc, err_tail = run_ffmpeg_with_live_logs(cmd_hdr_3, job_id, log)
-
-            # Attempt 4: 10-bit H.264 High10 fallback (CRF 15, 14Mbps)
-            if rc != 0 or not os.path.exists(processed_path) or os.path.getsize(processed_path) < 1024:
-                log("[WARN] libx265 not available, encoding with 10-Bit H.264 (High10 Rich HLG HDR) at CRF 15 (14Mbps)...")
-                cmd_hdr_4 = [
                     "ffmpeg", "-y", "-i", in_path,
                     "-map", "0:v:0", "-map", "0:a?",
                     "-vf", vf_hdr_universal,
                     "-c:v", "libx264", "-preset", "fast", "-crf", "15",
                     "-g", "60", "-keyint_min", "30",
                     "-maxrate", f"{hdr_maxrate}k", "-bufsize", f"{hdr_bufsize}k",
-                    "-color_primaries", "bt2020", "-color_trc", "arib-std-b67", "-colorspace", "bt2020nc",
+                    "-color_primaries", "bt709", "-color_trc", "arib-std-b67", "-colorspace", "bt709",
                     "-c:a", "aac", "-b:a", "256k",
                     "-movflags", "+faststart",
                     processed_path
                 ]
+                rc2, err_tail2 = run_ffmpeg_with_live_logs(cmd_hdr_3, job_id, log)
+                if rc2 != 0:
+                    raise RuntimeError(f"FFmpeg 10-bit HDR encode error: {err_tail2[-250:]}")
                 rc2, err_tail2 = run_ffmpeg_with_live_logs(cmd_hdr_4, job_id, log)
                 if rc2 != 0:
                     raise RuntimeError(f"FFmpeg 10-bit HDR encode error: {err_tail2[-250:]}")
